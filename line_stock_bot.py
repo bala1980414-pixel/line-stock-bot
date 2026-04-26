@@ -10,8 +10,8 @@ app = Flask(__name__)
 # LINE 環境變數
 # Render → Environment 設定
 # =========================
-CHANNEL_ACCESS_TOKEN = os.environ.get("pFTv08zf8YAdzE6GqpRc+uq9a+m70TKWF01+TrOKdstzd+pg1oGpZ8rr82pz0TKQQNDEGkI6fZQsIfoIsBfRRCX9Qme1TJXXLeWGGGJTiCo11vH2uBldaLzhULch7fe9smQMYld8GXt2jiS0HlH3TwdB04t89/1O/w1cDnyilFU=")
-CHANNEL_SECRET = os.environ.get("162af4488351b3e8d42464e5ff3f03cd")
+CHANNEL_ACCESS_TOKEN = os.environ.get("CHANNEL_ACCESS_TOKEN")
+CHANNEL_SECRET = os.environ.get("CHANNEL_SECRET")
 
 
 # =========================
