@@ -10,11 +10,11 @@ from datetime import datetime
 app = Flask(__name__)
 
 # ============================================================
-# LINE股票機器人 V3.1 台股名稱強化版
+# LINE股票機器人 V3.2 專業排版優化版
 # 新增重點：
-# 1. LINE 回覆股票代碼時，固定顯示股票名稱
-# 2. 即使 TWSE 即時 API 抓不到，也會用內建股票名稱表補上
-# 3. 保留 V3 功能：台股即時價優先、Yahoo備援、防錯價引擎、AI續抱分數、AI進出場分數、選股
+# 1. LINE 單檔回覆順序改成交易決策優先
+# 2. 趨勢燈號改成 🟢🟡🔴 圓燈顯示
+# 3. 保留 V3.1 功能：股票名稱確認、台股即時價優先、Yahoo備援、防錯價引擎、AI分數、選股
 # ============================================================
 
 CHANNEL_ACCESS_TOKEN = os.getenv("CHANNEL_ACCESS_TOKEN")
@@ -25,7 +25,6 @@ LINE_REPLY_URL = "https://api.line.me/v2/bot/message/reply"
 
 # ============================================================
 # 台股名稱表：電子 + 重電 + 常用觀察股
-# 後續可以繼續擴充
 # ============================================================
 STOCK_NAME_MAP = {
     "1101": "台泥",
@@ -55,6 +54,7 @@ STOCK_NAME_MAP = {
     "2354": "鴻準",
     "2356": "英業達",
     "2357": "華碩",
+    "2368": "金像電",
     "2379": "瑞昱",
     "2382": "廣達",
     "2383": "台光電",
@@ -166,10 +166,8 @@ def clean_stock_code(stock_code):
 
 def get_stock_name(code, realtime_name=""):
     code = clean_stock_code(code)
-
     if realtime_name and realtime_name.strip():
         return realtime_name.strip()
-
     return STOCK_NAME_MAP.get(code, "名稱未收錄")
 
 
@@ -363,7 +361,7 @@ def analyze_stock(stock_code, buy_price):
             daily_change_pct = ((current_price - previous_close) / previous_close) * 100 if previous_close > 0 else 0
             profit_pct = ((current_price - buy_price) / buy_price) * 100
 
-            return f"""LINE股票機器人 V3.1 台股名稱強化版
+            return f"""LINE股票機器人 V3.2 專業排版優化版
 
 股票：{code} {stock_name}
 即時來源：{realtime.get("source")}
@@ -428,7 +426,7 @@ def analyze_stock(stock_code, buy_price):
 
     if not ok:
         return (
-            f"LINE股票機器人 V3.1 台股名稱強化版\n\n"
+            f"LINE股票機器人 V3.2 專業排版優化版\n\n"
             f"股票：{code} {stock_name}\n"
             f"買入價：{buy_price:.2f}\n"
             f"目前價：{current_price:.2f}\n\n"
@@ -466,19 +464,19 @@ def analyze_stock(stock_code, buy_price):
 
     if current_price > ma5 > ma10 > ma20:
         ma_status = "多頭排列，趨勢偏強"
-        trend_light = "綠燈：趨勢偏多"
+        trend_light = "🟢 趨勢偏多"
     elif current_price < ma20:
         ma_status = "跌破20日線，趨勢轉弱"
-        trend_light = "紅燈：轉弱警戒"
+        trend_light = "🔴 轉弱警戒"
     elif current_price < ma10:
         ma_status = "跌破10日線，短線轉弱"
-        trend_light = "黃燈：短線降溫"
+        trend_light = "🟡 短線降溫"
     elif current_price < ma5:
         ma_status = "跌破5日線，短線降溫"
-        trend_light = "黃燈：短線降溫"
+        trend_light = "🟡 短線降溫"
     else:
         ma_status = "均線結構普通，需觀察"
-        trend_light = "黃燈：觀察"
+        trend_light = "🟡 觀察"
 
     if volume_ratio >= 2:
         volume_status = "爆量，市場關注度高"
@@ -489,13 +487,13 @@ def analyze_stock(stock_code, buy_price):
     else:
         volume_status = "量縮，追價力道不足"
 
-    false_break_risk = "低"
+    false_break_risk = "🟢 低"
     if current_price >= recent_high_20 * 0.98 and volume_ratio < 1:
-        false_break_risk = "高：接近20日高點但量能不足"
+        false_break_risk = "🔴 高：接近20日高點但量能不足"
     elif current_price >= recent_high_20 * 0.95 and volume_ratio < 1.3:
-        false_break_risk = "中：接近高點但量能未明顯放大"
+        false_break_risk = "🟡 中：接近高點但量能未明顯放大"
     elif rsi >= 80 and volume_ratio < 1:
-        false_break_risk = "中：RSI過熱但量能不足"
+        false_break_risk = "🟡 中：RSI過熱但量能不足"
 
     limit_status = "一般區間"
     if daily_change_pct >= 9:
@@ -529,13 +527,13 @@ def analyze_stock(stock_code, buy_price):
         hold_reasons.append("達停利目標1")
 
     if hold_score >= 6:
-        hold_level = "A：強勢續抱"
+        hold_level = "🟢 A：強勢續抱"
     elif hold_score >= 4:
-        hold_level = "B：偏多續抱"
+        hold_level = "🟡 B：偏多續抱"
     elif hold_score >= 2:
-        hold_level = "C：觀察"
+        hold_level = "🟡 C：觀察"
     else:
-        hold_level = "D：偏弱"
+        hold_level = "🔴 D：偏弱"
 
     entry_exit_score = 0
     entry_exit_reasons = []
@@ -569,27 +567,27 @@ def analyze_stock(stock_code, buy_price):
         entry_exit_reasons.append("單日跌幅偏大扣分")
 
     if entry_exit_score >= 8:
-        entry_exit_level = "強勢偏多，可續抱或小量加碼"
+        entry_exit_level = "🟢 強勢偏多，可續抱或小量加碼"
     elif entry_exit_score >= 5:
-        entry_exit_level = "偏多，續抱觀察"
+        entry_exit_level = "🟡 偏多，續抱觀察"
     elif entry_exit_score >= 2:
-        entry_exit_level = "中性，先觀察"
+        entry_exit_level = "🟡 中性，先觀察"
     else:
-        entry_exit_level = "偏弱，避免加碼並留意出場"
+        entry_exit_level = "🔴 偏弱，避免加碼並留意出場"
 
     if current_price > ma5 and rsi >= 50 and volume_ratio >= 1:
-        short_term_mode = "短線偏多"
+        short_term_mode = "🟢 短線偏多"
     elif current_price < ma5 or rsi < 50:
-        short_term_mode = "短線轉弱"
+        short_term_mode = "🔴 短線轉弱"
     else:
-        short_term_mode = "短線觀察"
+        short_term_mode = "🟡 短線觀察"
 
     if current_price > ma20 and ma10 > ma20:
-        swing_mode = "波段偏多"
+        swing_mode = "🟢 波段偏多"
     elif current_price < ma20:
-        swing_mode = "波段轉弱"
+        swing_mode = "🔴 波段轉弱"
     else:
-        swing_mode = "波段觀察"
+        swing_mode = "🟡 波段觀察"
 
     exit_reasons = []
     keep_reasons = []
@@ -615,25 +613,28 @@ def analyze_stock(stock_code, buy_price):
         keep_reasons.append("AI續抱分數偏高")
 
     if len(exit_reasons) > 0:
-        suggestion = "出場 / 減碼"
+        suggestion = "🔴 出場 / 減碼"
         suggestion_detail = "、".join(exit_reasons)
     elif rsi >= 80 and current_price < ma5:
-        suggestion = "部分停利"
+        suggestion = "🟡 部分停利"
         suggestion_detail = "RSI過熱後跌破5日線，短線可能拉回"
     elif hold_score >= 5 and entry_exit_score >= 5:
-        suggestion = "續抱"
+        suggestion = "🟢 續抱"
         suggestion_detail = "、".join(keep_reasons) if keep_reasons else "趨勢與分數仍偏多"
     elif hold_score >= 3:
-        suggestion = "觀察 / 小心續抱"
+        suggestion = "🟡 觀察 / 小心續抱"
         suggestion_detail = "趨勢尚未完全轉弱，但續抱力道普通"
     else:
-        suggestion = "出場觀察"
+        suggestion = "🔴 出場觀察"
         suggestion_detail = "AI分數偏低，技術面轉弱"
 
     realtime_source = realtime.get("source") if realtime.get("success") else "Yahoo備援"
     realtime_time = realtime.get("time", "")
 
-    reply = f"""LINE股票機器人 V3.1 台股名稱強化版
+    # ============================================================
+    # V3.2 專業排版順序
+    # ============================================================
+    reply = f"""LINE股票機器人 V3.2 專業排版優化版
 
 股票：{code} {stock_name}
 資料來源：{realtime_source}
@@ -650,6 +651,29 @@ def analyze_stock(stock_code, buy_price):
 【趨勢燈號】
 {trend_light}
 漲跌停狀態：{limit_status}
+
+【支撐壓力】
+支撐1：約 {support_1:.2f}
+支撐2：約 {support_2:.2f}
+壓力1：約 {pressure_1:.2f}
+壓力2：約 {pressure_2:.2f}
+
+【停損】
+基本停損：{basic_stop_loss:.2f}
+均線停損：{ma_stop_loss:.2f}
+
+【停利】
+停利目標1：{take_profit_1:.2f}
+停利目標2：{take_profit_2:.2f}
+
+【移動停利】
+近20日高點：{recent_high_20:.2f}
+移動停利1：{trailing_profit_1:.2f}
+移動停利2：{trailing_profit_2:.2f}
+
+【建議】
+{suggestion}
+原因：{suggestion_detail}
 
 【AI續抱分數】
 分數：{hold_score}/7
@@ -682,29 +706,6 @@ MA60：{ma60:.2f}
 
 【假突破風險】
 {false_break_risk}
-
-【支撐壓力】
-支撐1：約 {support_1:.2f}
-支撐2：約 {support_2:.2f}
-壓力1：約 {pressure_1:.2f}
-壓力2：約 {pressure_2:.2f}
-
-【停損】
-基本停損：{basic_stop_loss:.2f}
-均線停損：{ma_stop_loss:.2f}
-
-【停利】
-停利目標1：{take_profit_1:.2f}
-停利目標2：{take_profit_2:.2f}
-
-【移動停利】
-近20日高點：{recent_high_20:.2f}
-移動停利1：{trailing_profit_1:.2f}
-移動停利2：{trailing_profit_2:.2f}
-
-【建議】
-{suggestion}
-原因：{suggestion_detail}
 
 提醒：此為技術分析輔助，不是保證獲利訊號。
 """
@@ -771,11 +772,11 @@ def score_for_pick(code, name):
             score -= 1
             reasons.append("量縮扣分")
 
-        risk = "低"
+        risk = "🟢 低"
         if current_price >= recent_high_20 * 0.98 and volume_ratio < 1:
-            risk = "高"
+            risk = "🔴 高"
         elif current_price >= recent_high_20 * 0.95 and volume_ratio < 1.3:
-            risk = "中"
+            risk = "🟡 中"
 
         return {
             "code": code,
@@ -803,7 +804,7 @@ def stock_pick_message():
             results.append(item)
 
     if not results:
-        return """LINE股票機器人 V3.1 台股名稱強化版
+        return """LINE股票機器人 V3.2 專業排版優化版
 
 目前選股資料暫時抓取失敗。
 請稍後再輸入：選股
@@ -814,7 +815,7 @@ def stock_pick_message():
     today = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     lines = []
-    lines.append("LINE股票機器人 V3.1 台股名稱強化版")
+    lines.append("LINE股票機器人 V3.2 專業排版優化版")
     lines.append("")
     lines.append("【今日AI強勢股觀察】")
     lines.append(f"時間：{today}")
@@ -871,7 +872,7 @@ def reply_message(reply_token, text):
 
 @app.route("/", methods=["GET"])
 def home():
-    return "LINE股票機器人 V3.1 台股名稱強化版 正常運行中"
+    return "LINE股票機器人 V3.2 專業排版優化版 正常運行中"
 
 
 @app.route("/callback", methods=["POST"])
@@ -892,7 +893,7 @@ def callback():
             user_text = event["message"]["text"].strip()
 
             if user_text.lower() in ["help", "說明", "使用說明"]:
-                help_text = """LINE股票機器人 V3.1 台股名稱強化版
+                help_text = """LINE股票機器人 V3.2 專業排版優化版
 
 使用方式一：
 輸入 股票代碼 買入價
@@ -902,24 +903,18 @@ def callback():
 2317 180
 6488.TWO 100
 
-回覆會顯示：
-股票：2330 台積電
-
 使用方式二：
 輸入：
 選股
 
-回傳內容：
-1. 股票名稱確認
-2. 台股即時價格優先
-3. 防 Yahoo 錯價引擎
-4. RSI過熱判斷
-5. 移動停利
-6. 均線停損
-7. 假突破風險
-8. AI續抱分數
-9. AI進出場分數
-10. 今日AI強勢股觀察
+V3.2重點：
+1. 交易決策優先排版
+2. 趨勢燈號改成 🟢🟡🔴
+3. 股票名稱確認
+4. 防錯價引擎
+5. 支撐壓力優先顯示
+6. 停損 / 停利 / 移動停利優先顯示
+7. AI分數與技術細節放後方
 """
                 reply_message(reply_token, help_text)
                 continue
