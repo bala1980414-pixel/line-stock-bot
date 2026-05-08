@@ -16,7 +16,8 @@ app = Flask(__name__)
 # 2. 支撐壓力、停損、停利、移動停利加入圖示
 # 3. 趨勢燈號使用 🟢🟡🔴
 # 4. 單檔分析順序維持交易決策優先
-# 5. 保留股票名稱確認、台股即時價優先、Yahoo備援、防錯價引擎、AI分數、選股
+# 5. 深夜防呆：若 Yahoo 半夜換日抓到 0 元，自動改用最近一筆有效收盤價
+# 6. 保留股票名稱確認、台股即時價優先、Yahoo備援、防錯價引擎、AI分數、選股
 # ============================================================
 
 CHANNEL_ACCESS_TOKEN = os.getenv("CHANNEL_ACCESS_TOKEN")
@@ -261,6 +262,49 @@ def patch_history_with_realtime(data, realtime):
     return fixed
 
 
+def apply_midnight_fallback(data):
+    """
+    深夜防呆：
+    Yahoo Finance 在午夜換日時，有時會把最新一根K棒的 Close / OHLC 回傳為 0。
+    這裡會把 0 或負數價格視為無效，並用最近一筆有效價格往前補。
+    目的：避免半夜測試時出現目前價 0 元，導致停止分析。
+    """
+    if data is None or data.empty:
+        return data, "未啟動"
+
+    fixed = data.copy()
+    price_cols = ["Open", "High", "Low", "Close", "Adj Close"]
+    existing_cols = [col for col in price_cols if col in fixed.columns]
+
+    if not existing_cols:
+        return fixed, "未啟動"
+
+    last_close_before = 0
+    if "Close" in fixed.columns:
+        last_close_before = safe_float(fixed["Close"].iloc[-1], 0)
+
+    # 將 0 / 負數價格改成空值，再用前一筆有效價格補上
+    for col in existing_cols:
+        fixed[col] = pd.to_numeric(fixed[col], errors="coerce")
+        fixed.loc[fixed[col] <= 0, col] = pd.NA
+        fixed[col] = fixed[col].ffill()
+
+    # 如果最新 Open/High/Low 還是空，用最新 Close 補
+    if "Close" in fixed.columns:
+        latest_close = safe_float(fixed["Close"].iloc[-1], 0)
+        if latest_close > 0:
+            for col in ["Open", "High", "Low", "Adj Close"]:
+                if col in fixed.columns and safe_float(fixed[col].iloc[-1], 0) <= 0:
+                    fixed.loc[fixed.index[-1], col] = latest_close
+
+    last_close_after = safe_float(fixed["Close"].iloc[-1], 0) if "Close" in fixed.columns else 0
+
+    if last_close_before <= 0 and last_close_after > 0:
+        return fixed, f"深夜防呆啟動，已改用最近有效收盤價 {last_close_after:.2f}"
+
+    return fixed, "未啟動"
+
+
 def price_guard(current_price, buy_price, realtime, yahoo_price):
     messages = []
 
@@ -375,6 +419,7 @@ def analyze_stock(stock_code, buy_price):
 
     yahoo_price = safe_float(data["Close"].squeeze().iloc[-1])
     data = patch_history_with_realtime(data, realtime)
+    data, fallback_note = apply_midnight_fallback(data)
 
     try:
         close = data["Close"].squeeze()
@@ -640,6 +685,7 @@ def analyze_stock(stock_code, buy_price):
 
 【防錯價引擎】
 {guard_message}
+深夜防呆：{fallback_note}
 
 【趨勢燈號】
 {trend_light}
@@ -714,6 +760,7 @@ def score_for_pick(code, name):
         return None
 
     data = patch_history_with_realtime(data, realtime)
+    data, fallback_note = apply_midnight_fallback(data)
 
     try:
         close = data["Close"].squeeze()
@@ -914,6 +961,7 @@ V3.3重點：
 4. 趨勢燈號 🟢🟡🔴
 5. 假突破風險視覺化
 6. AI強勢股排行加入燈號
+7. 深夜防呆：Yahoo 半夜抓到 0 元時，改用最近有效收盤價
 """
                 reply_message(reply_token, help_text)
                 continue
