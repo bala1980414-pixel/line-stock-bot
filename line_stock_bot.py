@@ -4,26 +4,27 @@ import requests
 import yfinance as yf
 import pandas as pd
 import math
+import time
+from datetime import datetime
 
 app = Flask(__name__)
 
 # ============================================================
-# LINE股票機器人 V2.2 專業穩定版
+# LINE股票機器人 V3 真正 AI專業版
 # 功能：
-# 1. RSI過熱判斷
-# 2. 移動停利
-# 3. 均線停損
-# 4. 建議：續抱 / 出場 / 觀察 / 部分停利
-# 5. 股價異常保護
-# 6. Yahoo Finance 台股錯價倍率自動修正
-# 7. 上市 .TW / 上櫃 .TWO 自動嘗試
-# 8. AI續抱分數
-# 9. AI進出場分數
-# 10. 假突破風險
-# 11. 支撐壓力位
-# 12. 漲停 / 跌停接近判斷
-# 13. 短線 / 波段模式
-# 14. 輸入：選股 → 回覆功能開發提示
+# 1. 台股即時價格優先使用 TWSE / OTC MIS
+# 2. Yahoo Finance 只作為歷史K線與備援資料
+# 3. 防錯價引擎
+# 4. 多資料源交叉驗證
+# 5. RSI過熱判斷
+# 6. 移動停利
+# 7. 均線停損
+# 8. 假突破風險
+# 9. 支撐壓力位
+# 10. AI續抱分數
+# 11. AI進出場分數
+# 12. 短線 / 波段模式
+# 13. 輸入：選股 → 回今日強勢股
 # ============================================================
 
 CHANNEL_ACCESS_TOKEN = os.getenv("CHANNEL_ACCESS_TOKEN")
@@ -31,14 +32,50 @@ CHANNEL_SECRET = os.getenv("CHANNEL_SECRET")
 
 LINE_REPLY_URL = "https://api.line.me/v2/bot/message/reply"
 
+# ============================================================
+# V3 內建選股池：電子 + 重電核心觀察股
+# 可日後擴充成完整 AI選股主程式 V7.5 串接
+# ============================================================
+WATCHLIST = {
+    "2330": "台積電",
+    "2317": "鴻海",
+    "2454": "聯發科",
+    "2303": "聯電",
+    "2308": "台達電",
+    "2382": "廣達",
+    "3231": "緯創",
+    "2356": "英業達",
+    "6669": "緯穎",
+    "3711": "日月光投控",
+    "3034": "聯詠",
+    "2379": "瑞昱",
+    "2345": "智邦",
+    "2383": "台光電",
+    "2368": "金像電",
+    "3324": "雙鴻",
+    "3017": "奇鋐",
+    "3653": "健策",
+    "2449": "京元電子",
+    "6446": "藥華藥",
+    "1513": "中興電",
+    "1514": "亞力",
+    "1504": "東元",
+    "1605": "華新",
+    "1609": "大亞",
+}
+
 
 # ============================================================
-# 工具：安全轉數字
+# 安全轉數字
 # ============================================================
 def safe_float(value, default=0.0):
     try:
         if value is None:
             return default
+        if isinstance(value, str):
+            value = value.replace(",", "").strip()
+            if value in ["", "-", "--", "NaN", "nan"]:
+                return default
         v = float(value)
         if math.isnan(v) or math.isinf(v):
             return default
@@ -66,18 +103,105 @@ def calculate_rsi(close_series, period=14):
 
 
 # ============================================================
-# 股票資料下載：自動嘗試 .TW / .TWO
+# 股票代碼正規化
 # ============================================================
-def download_stock_data(stock_code):
-    stock_code = stock_code.strip().upper()
+def clean_stock_code(stock_code):
+    code = stock_code.strip().upper()
+    code = code.replace(".TW", "").replace(".TWO", "")
+    return code
+
+
+# ============================================================
+# TWSE / OTC 即時價格
+# ============================================================
+def get_twse_otc_realtime_price(stock_code):
+    code = clean_stock_code(stock_code)
+
+    sources = [
+        ("上市TWSE", f"tse_{code}.tw"),
+        ("上櫃OTC", f"otc_{code}.tw"),
+    ]
+
+    headers = {
+        "User-Agent": "Mozilla/5.0"
+    }
+
+    for market_name, ex_ch in sources:
+        try:
+            url = "https://mis.twse.com.tw/stock/api/getStockInfo.jsp"
+            params = {
+                "ex_ch": ex_ch,
+                "json": "1",
+                "delay": "0",
+                "_": str(int(time.time() * 1000))
+            }
+
+            r = requests.get(url, params=params, headers=headers, timeout=5)
+            data = r.json()
+
+            msg_array = data.get("msgArray", [])
+
+            if not msg_array:
+                continue
+
+            item = msg_array[0]
+
+            # z = 最新成交價，若 z 為 "-"，用 y 昨收作備援
+            current_price = safe_float(item.get("z"), 0)
+            previous_close = safe_float(item.get("y"), 0)
+            open_price = safe_float(item.get("o"), 0)
+            high_price = safe_float(item.get("h"), 0)
+            low_price = safe_float(item.get("l"), 0)
+            name = item.get("n", "")
+            time_str = item.get("t", "")
+
+            if current_price <= 0 and previous_close > 0:
+                current_price = previous_close
+
+            if current_price > 0:
+                return {
+                    "success": True,
+                    "source": market_name,
+                    "symbol": ex_ch,
+                    "name": name,
+                    "current_price": current_price,
+                    "previous_close": previous_close,
+                    "open": open_price,
+                    "high": high_price,
+                    "low": low_price,
+                    "time": time_str,
+                }
+
+        except Exception as e:
+            print(f"{market_name} 即時價格讀取失敗：", e)
+
+    return {
+        "success": False,
+        "source": "無",
+        "symbol": "",
+        "name": "",
+        "current_price": 0,
+        "previous_close": 0,
+        "open": 0,
+        "high": 0,
+        "low": 0,
+        "time": "",
+    }
+
+
+# ============================================================
+# Yahoo Finance 歷史資料：自動嘗試 .TW / .TWO
+# ============================================================
+def download_yahoo_history(stock_code):
+    code = stock_code.strip().upper()
 
     candidates = []
 
-    if stock_code.endswith(".TW") or stock_code.endswith(".TWO"):
-        candidates.append(stock_code)
+    if code.endswith(".TW") or code.endswith(".TWO"):
+        candidates.append(code)
     else:
-        candidates.append(stock_code + ".TW")
-        candidates.append(stock_code + ".TWO")
+        candidates.append(code + ".TW")
+        candidates.append(code + ".TWO")
 
     for symbol in candidates:
         try:
@@ -94,77 +218,64 @@ def download_stock_data(stock_code):
                 return symbol, data
 
         except Exception as e:
-            print(f"下載 {symbol} 失敗：", e)
+            print(f"Yahoo 下載 {symbol} 失敗：", e)
 
     return None, None
 
 
 # ============================================================
-# Yahoo Finance 台股錯價倍率自動修正
-# 說明：
-# 有時台股資料會出現 10倍 / 100倍錯價。
-# 此處用「買入價」做合理性基準，只在明顯錯價時修正。
+# 使用即時價格修正 Yahoo 最後一根K線
 # ============================================================
-def auto_fix_price_scale(data, buy_price):
-    try:
-        close = data["Close"].squeeze()
-        last_close = safe_float(close.iloc[-1])
+def patch_history_with_realtime(data, realtime):
+    if data is None or data.empty:
+        return data
 
-        if last_close <= 0 or buy_price <= 0:
-            return data, 1, "未修正"
+    if not realtime.get("success"):
+        return data
 
-        ratio = last_close / buy_price
+    current_price = safe_float(realtime.get("current_price"), 0)
+    previous_close = safe_float(realtime.get("previous_close"), 0)
+    high_price = safe_float(realtime.get("high"), 0)
+    low_price = safe_float(realtime.get("low"), 0)
+    open_price = safe_float(realtime.get("open"), 0)
 
-        fix_factor = 1
-        fix_note = "未修正"
+    if current_price <= 0:
+        return data
 
-        # 價格明顯為 10倍
-        if 3 <= ratio < 30:
-            fix_factor = 10
-            fix_note = "偵測到疑似10倍錯價，已自動除以10修正"
+    fixed = data.copy()
 
-        # 價格明顯為 100倍
-        elif ratio >= 30:
-            fix_factor = 100
-            fix_note = "偵測到疑似100倍錯價，已自動除以100修正"
+    last_idx = fixed.index[-1]
 
-        # 價格明顯為 1/10
-        elif 0.03 < ratio <= 0.2:
-            fix_factor = 0.1
-            fix_note = "偵測到疑似1/10錯價，已自動乘以10修正"
+    # 保留 Yahoo 歷史資料，但最後一日用台股即時價覆蓋
+    fixed.loc[last_idx, "Close"] = current_price
+    fixed.loc[last_idx, "Adj Close"] = current_price
 
-        # 價格明顯為 1/100
-        elif ratio <= 0.03:
-            fix_factor = 0.01
-            fix_note = "偵測到疑似1/100錯價，已自動乘以100修正"
+    if open_price > 0:
+        fixed.loc[last_idx, "Open"] = open_price
 
-        if fix_factor == 1:
-            return data, 1, fix_note
+    if high_price > 0:
+        fixed.loc[last_idx, "High"] = max(high_price, current_price)
+    else:
+        fixed.loc[last_idx, "High"] = max(safe_float(fixed.loc[last_idx, "High"]), current_price)
 
-        fixed_data = data.copy()
+    if low_price > 0:
+        fixed.loc[last_idx, "Low"] = min(low_price, current_price)
+    else:
+        fixed.loc[last_idx, "Low"] = min(safe_float(fixed.loc[last_idx, "Low"]), current_price)
 
-        price_cols = ["Open", "High", "Low", "Close", "Adj Close"]
+    if previous_close > 0 and len(fixed) >= 2:
+        fixed.loc[fixed.index[-2], "Close"] = previous_close
+        fixed.loc[fixed.index[-2], "Adj Close"] = previous_close
 
-        for col in price_cols:
-            if col in fixed_data.columns:
-                if fix_factor in [10, 100]:
-                    fixed_data[col] = fixed_data[col] / fix_factor
-                elif fix_factor == 0.1:
-                    fixed_data[col] = fixed_data[col] * 10
-                elif fix_factor == 0.01:
-                    fixed_data[col] = fixed_data[col] * 100
-
-        return fixed_data, fix_factor, fix_note
-
-    except Exception as e:
-        print("價格倍率修正失敗：", e)
-        return data, 1, "倍率修正失敗，使用原始資料"
+    return fixed
 
 
 # ============================================================
-# 最終價格合理性檢查
+# 防錯價引擎
 # ============================================================
-def final_price_check(current_price, buy_price):
+def price_guard(current_price, buy_price, realtime, yahoo_price):
+    messages = []
+
     if current_price <= 0:
         return False, "目前價小於等於0，資料異常"
 
@@ -173,34 +284,76 @@ def final_price_check(current_price, buy_price):
 
     ratio = current_price / buy_price
 
-    # 修正後仍差距過大，停止分析
-    if ratio >= 3:
-        return False, "修正後目前價仍與買入價差距過大，可能資料異常"
-    if ratio <= 0.2:
-        return False, "修正後目前價仍與買入價差距過大，可能資料異常"
+    # 用戶買入價可能很久以前，價格差異不能太嚴格
+    # 但若超過5倍或低於1/5，仍提醒，避免資料錯誤
+    if ratio >= 5:
+        return False, "目前價與買入價差距超過5倍，可能資料異常或買入價輸入錯誤"
 
-    return True, "資料合理"
+    if ratio <= 0.2:
+        return False, "目前價與買入價差距過大，可能資料異常或買入價輸入錯誤"
+
+    if realtime.get("success"):
+        rt_price = safe_float(realtime.get("current_price"), 0)
+        if yahoo_price > 0 and rt_price > 0:
+            diff_pct = abs(rt_price - yahoo_price) / rt_price * 100
+            if diff_pct >= 10:
+                messages.append(f"Yahoo價與台股即時價差異約{diff_pct:.1f}%，已優先採用台股即時價")
+
+    if not messages:
+        messages.append("通過，優先採用台股即時價")
+
+    return True, "；".join(messages)
 
 
 # ============================================================
-# 主分析程式
+# 單檔股票分析
 # ============================================================
 def analyze_stock(stock_code, buy_price):
-    symbol, data = download_stock_data(stock_code)
+    code = clean_stock_code(stock_code)
+
+    realtime = get_twse_otc_realtime_price(code)
+    yahoo_symbol, data = download_yahoo_history(code)
 
     if data is None or data.empty:
+        if realtime.get("success"):
+            current_price = safe_float(realtime.get("current_price"))
+            previous_close = safe_float(realtime.get("previous_close"))
+            daily_change_pct = ((current_price - previous_close) / previous_close) * 100 if previous_close > 0 else 0
+            profit_pct = ((current_price - buy_price) / buy_price) * 100
+
+            return f"""LINE股票機器人 V3 真正 AI專業版
+
+股票：{code}
+名稱：{realtime.get("name", "")}
+即時來源：{realtime.get("source")}
+目前價：{current_price:.2f}
+今日漲跌：約 {daily_change_pct:.2f}%
+目前損益：約 {profit_pct:.2f}%
+
+【提醒】
+目前只取得台股即時價格，Yahoo 歷史K線暫時無法取得。
+因此本次不產生 RSI / 均線 / 移動停利分析。
+
+請稍後再試一次。
+"""
+
         return (
             f"查不到 {stock_code} 的有效資料。\n\n"
             "可能原因：\n"
             "1. 股票代碼輸入錯誤\n"
-            "2. Yahoo Finance 暫時無資料\n"
+            "2. 台股即時資料與 Yahoo 歷史資料都暫時無法取得\n"
             "3. 該股票資料尚未更新\n\n"
             "請確認格式：\n"
             "上市股票：2330 800\n"
             "上櫃股票：6488.TWO 100"
         )
 
-    data, scale_factor, scale_note = auto_fix_price_scale(data, buy_price)
+    # Yahoo 原始最後價格，用來交叉驗證
+    yahoo_close_raw = data["Close"].squeeze()
+    yahoo_price = safe_float(yahoo_close_raw.iloc[-1])
+
+    # 用台股即時價格修正最後一天
+    data = patch_history_with_realtime(data, realtime)
 
     try:
         close = data["Close"].squeeze()
@@ -232,18 +385,16 @@ def analyze_stock(stock_code, buy_price):
         print("技術資料計算失敗：", e)
         return f"{stock_code} 技術資料計算失敗，請稍後再試。"
 
-    ok, check_message = final_price_check(current_price, buy_price)
+    ok, guard_message = price_guard(current_price, buy_price, realtime, yahoo_price)
 
     if not ok:
         return (
-            f"LINE股票機器人 V2.2 專業穩定版\n\n"
-            f"股票：{stock_code}\n"
-            f"資料代碼：{symbol}\n"
+            f"LINE股票機器人 V3 真正 AI專業版\n\n"
+            f"股票：{code}\n"
             f"買入價：{buy_price:.2f}\n"
             f"目前價：{current_price:.2f}\n\n"
-            "【資料異常保護】\n"
-            f"{check_message}\n\n"
-            f"資料修正狀態：{scale_note}\n\n"
+            "【防錯價引擎】\n"
+            f"{guard_message}\n\n"
             "系統已停止產生停損停利建議，避免用錯誤股價誤判。"
         )
 
@@ -266,7 +417,7 @@ def analyze_stock(stock_code, buy_price):
     ma_stop_loss = ma20
 
     # ============================================================
-    # 支撐壓力位
+    # 支撐壓力
     # ============================================================
     support_1 = max(ma20, recent_low_20)
     support_2 = recent_low_60
@@ -331,8 +482,7 @@ def analyze_stock(stock_code, buy_price):
         false_break_risk = "中：RSI過熱但量能不足"
 
     # ============================================================
-    # 漲停 / 跌停接近判斷
-    # 台股一般漲跌停約10%，此處以近似值輔助判斷
+    # 漲跌停接近判斷
     # ============================================================
     limit_status = "一般區間"
 
@@ -342,7 +492,7 @@ def analyze_stock(stock_code, buy_price):
         limit_status = "接近跌停，需嚴格控風險"
 
     # ============================================================
-    # AI續抱分數 0~7分
+    # AI續抱分數 0~7
     # ============================================================
     hold_score = 0
     hold_reasons = []
@@ -379,7 +529,7 @@ def analyze_stock(stock_code, buy_price):
         hold_level = "D：偏弱"
 
     # ============================================================
-    # AI進出場分數 0~10分
+    # AI進出場分數 0~10
     # ============================================================
     entry_exit_score = 0
     entry_exit_reasons = []
@@ -424,18 +574,19 @@ def analyze_stock(stock_code, buy_price):
     # ============================================================
     # 短線 / 波段模式
     # ============================================================
-    short_term_mode = "觀察"
-    swing_mode = "觀察"
-
     if current_price > ma5 and rsi >= 50 and volume_ratio >= 1:
         short_term_mode = "短線偏多"
     elif current_price < ma5 or rsi < 50:
         short_term_mode = "短線轉弱"
+    else:
+        short_term_mode = "短線觀察"
 
     if current_price > ma20 and ma10 > ma20:
         swing_mode = "波段偏多"
     elif current_price < ma20:
         swing_mode = "波段轉弱"
+    else:
+        swing_mode = "波段觀察"
 
     # ============================================================
     # 建議
@@ -479,20 +630,23 @@ def analyze_stock(stock_code, buy_price):
         suggestion = "出場觀察"
         suggestion_detail = "AI分數偏低，技術面轉弱"
 
-    # ============================================================
-    # 回覆內容
-    # ============================================================
-    reply = f"""LINE股票機器人 V2.2 專業穩定版
+    realtime_name = realtime.get("name", "")
+    realtime_source = realtime.get("source") if realtime.get("success") else "Yahoo備援"
+    realtime_time = realtime.get("time", "")
 
-股票：{stock_code}
-資料代碼：{symbol}
+    reply = f"""LINE股票機器人 V3 真正 AI專業版
+
+股票：{code} {realtime_name}
+資料來源：{realtime_source}
+歷史代碼：{yahoo_symbol}
+資料時間：{realtime_time if realtime_time else "依資料源更新"}
 買入價：{buy_price:.2f}
 目前價：{current_price:.2f}
 今日漲跌：約 {daily_change_pct:.2f}%
 目前損益：約 {profit_pct:.2f}%
 
-【資料穩定檢查】
-{scale_note}
+【防錯價引擎】
+{guard_message}
 
 【趨勢燈號】
 {trend_light}
@@ -559,31 +713,131 @@ MA60：{ma60:.2f}
 
 
 # ============================================================
-# 選股功能暫時提示
+# 選股分析：掃描內建觀察清單
 # ============================================================
+def score_for_pick(code, name):
+    realtime = get_twse_otc_realtime_price(code)
+    yahoo_symbol, data = download_yahoo_history(code)
+
+    if data is None or data.empty:
+        return None
+
+    data = patch_history_with_realtime(data, realtime)
+
+    try:
+        close = data["Close"].squeeze()
+        high = data["High"].squeeze()
+        volume = data["Volume"].squeeze()
+
+        current_price = safe_float(close.iloc[-1])
+        previous_close = safe_float(close.iloc[-2])
+
+        ma5 = safe_float(close.rolling(5).mean().iloc[-1])
+        ma10 = safe_float(close.rolling(10).mean().iloc[-1])
+        ma20 = safe_float(close.rolling(20).mean().iloc[-1])
+
+        rsi = safe_float(calculate_rsi(close).iloc[-1])
+
+        recent_high_20 = safe_float(high.iloc[-20:].max())
+
+        avg_volume_20 = safe_float(volume.rolling(20).mean().iloc[-1])
+        today_volume = safe_float(volume.iloc[-1])
+        volume_ratio = today_volume / avg_volume_20 if avg_volume_20 > 0 else 0
+
+        daily_change_pct = ((current_price - previous_close) / previous_close) * 100 if previous_close > 0 else 0
+
+        score = 0
+        reasons = []
+
+        if ma5 > ma10 > ma20:
+            score += 2
+            reasons.append("均線多頭")
+        if current_price > ma5:
+            score += 1
+            reasons.append("站上5日線")
+        if daily_change_pct > 0:
+            score += 1
+            reasons.append("今日上漲")
+        if volume_ratio >= 1.3:
+            score += 1
+            reasons.append("放量")
+        if 50 <= rsi <= 75:
+            score += 1
+            reasons.append("RSI強勢")
+        if current_price >= recent_high_20 * 0.98:
+            score += 1
+            reasons.append("接近20日高點")
+
+        if rsi >= 82:
+            score -= 1
+            reasons.append("RSI過熱扣分")
+        if volume_ratio < 0.7:
+            score -= 1
+            reasons.append("量縮扣分")
+
+        risk = "低"
+        if current_price >= recent_high_20 * 0.98 and volume_ratio < 1:
+            risk = "高"
+        elif current_price >= recent_high_20 * 0.95 and volume_ratio < 1.3:
+            risk = "中"
+
+        return {
+            "code": code,
+            "name": name,
+            "price": current_price,
+            "change": daily_change_pct,
+            "score": score,
+            "rsi": rsi,
+            "volume_ratio": volume_ratio,
+            "risk": risk,
+            "reasons": "、".join(reasons) if reasons else "無明顯訊號"
+        }
+
+    except Exception as e:
+        print(f"{code} 選股評分失敗：", e)
+        return None
+
+
 def stock_pick_message():
-    return """LINE股票機器人 V2.2 專業穩定版
+    results = []
 
-你輸入了：選股
+    for code, name in WATCHLIST.items():
+        item = score_for_pick(code, name)
+        if item is not None:
+            results.append(item)
 
-目前 V2.2 已先完成單檔股票專業分析：
-1. RSI過熱判斷
-2. 移動停利
-3. 均線停損
-4. 股價錯價修正
-5. 假突破風險
-6. AI續抱分數
-7. AI進出場分數
-8. 支撐壓力位
+    if not results:
+        return """LINE股票機器人 V3 真正 AI專業版
 
-下一階段可串接你的 AI選股主程式 V7.5：
-輸入「選股」→ 回傳今日強勢股 / 提前布局股。
-
-目前請先用：
-2330 800
-2317 180
-6488.TWO 100
+目前選股資料暫時抓取失敗。
+請稍後再輸入：選股
 """
+
+    results = sorted(results, key=lambda x: (x["score"], x["change"]), reverse=True)
+    top_results = results[:8]
+
+    today = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    lines = []
+    lines.append("LINE股票機器人 V3 真正 AI專業版")
+    lines.append("")
+    lines.append("【今日AI強勢股觀察】")
+    lines.append(f"時間：{today}")
+    lines.append("")
+    lines.append("說明：分數越高代表技術面越強，但仍需搭配風險控管。")
+    lines.append("")
+
+    for idx, item in enumerate(top_results, start=1):
+        lines.append(
+            f"{idx}. {item['code']} {item['name']}\n"
+            f"價：{item['price']:.2f}｜漲跌：{item['change']:.2f}%\n"
+            f"分數：{item['score']}/7｜RSI：{item['rsi']:.1f}｜量比：{item['volume_ratio']:.2f}\n"
+            f"假突破風險：{item['risk']}\n"
+            f"原因：{item['reasons']}\n"
+        )
+
+    lines.append("提醒：此為觀察名單，不是保證獲利訊號。")
+    return "\n".join(lines)
 
 
 # ============================================================
@@ -599,14 +853,21 @@ def reply_message(reply_token, text):
         "Authorization": f"Bearer {CHANNEL_ACCESS_TOKEN}"
     }
 
+    # LINE 單則文字訊息上限約 5000 字，保守切割
+    chunks = []
+    max_len = 4500
+
+    while len(text) > max_len:
+        chunks.append(text[:max_len])
+        text = text[max_len:]
+
+    chunks.append(text)
+
+    messages = [{"type": "text", "text": chunk} for chunk in chunks[:5]]
+
     body = {
         "replyToken": reply_token,
-        "messages": [
-            {
-                "type": "text",
-                "text": text
-            }
-        ]
+        "messages": messages
     }
 
     try:
@@ -622,7 +883,7 @@ def reply_message(reply_token, text):
 # ============================================================
 @app.route("/", methods=["GET"])
 def home():
-    return "LINE股票機器人 V2.2 專業穩定版 正常運行中"
+    return "LINE股票機器人 V3 真正 AI專業版 正常運行中"
 
 
 # ============================================================
@@ -646,36 +907,36 @@ def callback():
             user_text = event["message"]["text"].strip()
 
             if user_text.lower() in ["help", "說明", "使用說明"]:
-                help_text = """LINE股票機器人 V2.2 專業穩定版
+                help_text = """LINE股票機器人 V3 真正 AI專業版
 
-使用方式：
+使用方式一：
 輸入 股票代碼 買入價
 
 範例：
 2330 800
 2317 180
-
-若是上櫃股票，請輸入：
 6488.TWO 100
 
-也可輸入：
+使用方式二：
+輸入：
 選股
 
 回傳內容：
-1. RSI過熱判斷
-2. 移動停利1 / 移動停利2
-3. 均線停損
-4. 股價錯價修正
-5. 假突破風險
-6. AI續抱分數
-7. AI進出場分數
-8. 支撐壓力位
-9. 建議：續抱 / 出場 / 觀察
+1. 台股即時價格優先
+2. 防 Yahoo 錯價引擎
+3. RSI過熱判斷
+4. 移動停利
+5. 均線停損
+6. 假突破風險
+7. AI續抱分數
+8. AI進出場分數
+9. 支撐壓力位
+10. 今日AI強勢股觀察
 """
                 reply_message(reply_token, help_text)
                 continue
 
-            if user_text in ["選股", "今日選股", "強勢股"]:
+            if user_text in ["選股", "今日選股", "強勢股", "AI選股"]:
                 reply_message(reply_token, stock_pick_message())
                 continue
 
