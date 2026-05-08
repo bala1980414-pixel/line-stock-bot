@@ -10,125 +10,61 @@ from datetime import datetime
 app = Flask(__name__)
 
 # ============================================================
-# LINE股票機器人 V3.2 專業排版優化版
+# LINE股票機器人 V3.3 專業視覺強化版
 # 新增重點：
-# 1. LINE 單檔回覆順序改成交易決策優先
-# 2. 趨勢燈號改成 🟢🟡🔴 圓燈顯示
-# 3. 保留 V3.1 功能：股票名稱確認、台股即時價優先、Yahoo備援、防錯價引擎、AI分數、選股
+# 1. 加入「今日操作摘要」
+# 2. 支撐壓力、停損、停利、移動停利加入圖示
+# 3. 趨勢燈號使用 🟢🟡🔴
+# 4. 單檔分析順序維持交易決策優先
+# 5. 保留股票名稱確認、台股即時價優先、Yahoo備援、防錯價引擎、AI分數、選股
 # ============================================================
 
 CHANNEL_ACCESS_TOKEN = os.getenv("CHANNEL_ACCESS_TOKEN")
 CHANNEL_SECRET = os.getenv("CHANNEL_SECRET")
-
 LINE_REPLY_URL = "https://api.line.me/v2/bot/message/reply"
 
 
 # ============================================================
-# 台股名稱表：電子 + 重電 + 常用觀察股
+# 台股名稱表：常用電子 / AI / 重電 / 權值股
 # ============================================================
 STOCK_NAME_MAP = {
-    "1101": "台泥",
-    "1102": "亞泥",
-    "1216": "統一",
-    "1301": "台塑",
-    "1303": "南亞",
-    "1326": "台化",
-    "1402": "遠東新",
-    "1504": "東元",
-    "1513": "中興電",
-    "1514": "亞力",
-    "1605": "華新",
-    "1609": "大亞",
-    "2002": "中鋼",
-    "2207": "和泰車",
-    "2301": "光寶科",
-    "2303": "聯電",
-    "2308": "台達電",
-    "2317": "鴻海",
-    "2324": "仁寶",
-    "2327": "國巨",
-    "2330": "台積電",
-    "2344": "華邦電",
-    "2345": "智邦",
-    "2353": "宏碁",
-    "2354": "鴻準",
-    "2356": "英業達",
-    "2357": "華碩",
-    "2368": "金像電",
-    "2379": "瑞昱",
-    "2382": "廣達",
-    "2383": "台光電",
-    "2395": "研華",
-    "2408": "南亞科",
-    "2409": "友達",
-    "2412": "中華電",
-    "2449": "京元電子",
-    "2454": "聯發科",
-    "2474": "可成",
-    "2603": "長榮",
-    "2609": "陽明",
-    "2615": "萬海",
-    "2880": "華南金",
-    "2881": "富邦金",
-    "2882": "國泰金",
-    "2884": "玉山金",
-    "2885": "元大金",
-    "2886": "兆豐金",
-    "2891": "中信金",
-    "2892": "第一金",
-    "3008": "大立光",
-    "3017": "奇鋐",
-    "3034": "聯詠",
-    "3037": "欣興",
-    "3045": "台灣大",
-    "3231": "緯創",
-    "3324": "雙鴻",
-    "3443": "創意",
-    "3481": "群創",
-    "3653": "健策",
-    "3661": "世芯-KY",
-    "3711": "日月光投控",
-    "4938": "和碩",
-    "5269": "祥碩",
-    "5347": "世界",
-    "5483": "中美晶",
-    "5871": "中租-KY",
-    "5880": "合庫金",
-    "6409": "旭隼",
-    "6415": "矽力*-KY",
-    "6446": "藥華藥",
-    "6488": "環球晶",
-    "6669": "緯穎",
-    "8046": "南電",
-    "8069": "元太",
-    "8299": "群聯",
+    "1101": "台泥", "1102": "亞泥", "1216": "統一",
+    "1301": "台塑", "1303": "南亞", "1326": "台化",
+    "1402": "遠東新", "1504": "東元", "1513": "中興電",
+    "1514": "亞力", "1605": "華新", "1609": "大亞",
+    "2002": "中鋼", "2207": "和泰車",
+    "2301": "光寶科", "2303": "聯電", "2308": "台達電",
+    "2317": "鴻海", "2324": "仁寶", "2327": "國巨",
+    "2330": "台積電", "2344": "華邦電", "2345": "智邦",
+    "2353": "宏碁", "2354": "鴻準", "2356": "英業達",
+    "2357": "華碩", "2368": "金像電", "2379": "瑞昱",
+    "2382": "廣達", "2383": "台光電", "2395": "研華",
+    "2408": "南亞科", "2409": "友達", "2412": "中華電",
+    "2449": "京元電子", "2454": "聯發科", "2474": "可成",
+    "2603": "長榮", "2609": "陽明", "2615": "萬海",
+    "2880": "華南金", "2881": "富邦金", "2882": "國泰金",
+    "2884": "玉山金", "2885": "元大金", "2886": "兆豐金",
+    "2891": "中信金", "2892": "第一金",
+    "3008": "大立光", "3017": "奇鋐", "3034": "聯詠",
+    "3037": "欣興", "3045": "台灣大", "3231": "緯創",
+    "3324": "雙鴻", "3443": "創意", "3481": "群創",
+    "3653": "健策", "3661": "世芯-KY", "3711": "日月光投控",
+    "4938": "和碩", "5269": "祥碩", "5347": "世界",
+    "5483": "中美晶", "5871": "中租-KY", "5880": "合庫金",
+    "6409": "旭隼", "6415": "矽力*-KY", "6446": "藥華藥",
+    "6488": "環球晶", "6669": "緯穎", "8046": "南電",
+    "8069": "元太", "8299": "群聯",
 }
 
 WATCHLIST = {
-    "2330": "台積電",
-    "2317": "鴻海",
-    "2454": "聯發科",
-    "2303": "聯電",
-    "2308": "台達電",
-    "2382": "廣達",
-    "3231": "緯創",
-    "2356": "英業達",
-    "6669": "緯穎",
-    "3711": "日月光投控",
-    "3034": "聯詠",
-    "2379": "瑞昱",
-    "2345": "智邦",
-    "2383": "台光電",
-    "2368": "金像電",
-    "3324": "雙鴻",
-    "3017": "奇鋐",
-    "3653": "健策",
-    "2449": "京元電子",
-    "1513": "中興電",
-    "1514": "亞力",
-    "1504": "東元",
-    "1605": "華新",
-    "1609": "大亞",
+    "2330": "台積電", "2317": "鴻海", "2454": "聯發科",
+    "2303": "聯電", "2308": "台達電", "2382": "廣達",
+    "3231": "緯創", "2356": "英業達", "6669": "緯穎",
+    "3711": "日月光投控", "3034": "聯詠", "2379": "瑞昱",
+    "2345": "智邦", "2383": "台光電", "2368": "金像電",
+    "3324": "雙鴻", "3017": "奇鋐", "3653": "健策",
+    "2449": "京元電子", "1513": "中興電", "1514": "亞力",
+    "1504": "東元", "1605": "華新", "1609": "大亞",
 }
 
 
@@ -148,16 +84,6 @@ def safe_float(value, default=0.0):
         return default
 
 
-def calculate_rsi(close_series, period=14):
-    delta = close_series.diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.rolling(window=period).mean()
-    avg_loss = loss.rolling(window=period).mean()
-    rs = avg_gain / avg_loss
-    return 100 - (100 / (1 + rs))
-
-
 def clean_stock_code(stock_code):
     code = stock_code.strip().upper()
     code = code.replace(".TW", "").replace(".TWO", "")
@@ -171,14 +97,34 @@ def get_stock_name(code, realtime_name=""):
     return STOCK_NAME_MAP.get(code, "名稱未收錄")
 
 
+def calculate_rsi(close_series, period=14):
+    delta = close_series.diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.rolling(window=period).mean()
+    avg_loss = loss.rolling(window=period).mean()
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
+
+
+def normalize_yfinance_columns(data):
+    if data is None or data.empty:
+        return data
+    if isinstance(data.columns, pd.MultiIndex):
+        data = data.copy()
+        data.columns = data.columns.get_level_values(0)
+    return data
+
+
+# ============================================================
+# TWSE / OTC 即時價格
+# ============================================================
 def get_twse_otc_realtime_price(stock_code):
     code = clean_stock_code(stock_code)
-
     sources = [
         ("上市TWSE", f"tse_{code}.tw"),
         ("上櫃OTC", f"otc_{code}.tw"),
     ]
-
     headers = {"User-Agent": "Mozilla/5.0"}
 
     for market_name, ex_ch in sources:
@@ -190,16 +136,13 @@ def get_twse_otc_realtime_price(stock_code):
                 "delay": "0",
                 "_": str(int(time.time() * 1000))
             }
-
             r = requests.get(url, params=params, headers=headers, timeout=5)
             data = r.json()
             msg_array = data.get("msgArray", [])
-
             if not msg_array:
                 continue
 
             item = msg_array[0]
-
             current_price = safe_float(item.get("z"), 0)
             previous_close = safe_float(item.get("y"), 0)
             open_price = safe_float(item.get("o"), 0)
@@ -242,6 +185,9 @@ def get_twse_otc_realtime_price(stock_code):
     }
 
 
+# ============================================================
+# Yahoo Finance 歷史資料
+# ============================================================
 def download_yahoo_history(stock_code):
     code = stock_code.strip().upper()
     candidates = []
@@ -262,7 +208,7 @@ def download_yahoo_history(stock_code):
                 progress=False,
                 threads=False
             )
-
+            data = normalize_yfinance_columns(data)
             if data is not None and not data.empty and len(data) >= 60:
                 return symbol, data
 
@@ -275,7 +221,6 @@ def download_yahoo_history(stock_code):
 def patch_history_with_realtime(data, realtime):
     if data is None or data.empty:
         return data
-
     if not realtime.get("success"):
         return data
 
@@ -292,7 +237,8 @@ def patch_history_with_realtime(data, realtime):
     last_idx = fixed.index[-1]
 
     fixed.loc[last_idx, "Close"] = current_price
-    fixed.loc[last_idx, "Adj Close"] = current_price
+    if "Adj Close" in fixed.columns:
+        fixed.loc[last_idx, "Adj Close"] = current_price
 
     if open_price > 0:
         fixed.loc[last_idx, "Open"] = open_price
@@ -309,7 +255,8 @@ def patch_history_with_realtime(data, realtime):
 
     if previous_close > 0 and len(fixed) >= 2:
         fixed.loc[fixed.index[-2], "Close"] = previous_close
-        fixed.loc[fixed.index[-2], "Adj Close"] = previous_close
+        if "Adj Close" in fixed.columns:
+            fixed.loc[fixed.index[-2], "Adj Close"] = previous_close
 
     return fixed
 
@@ -347,6 +294,44 @@ def price_guard(current_price, buy_price, realtime, yahoo_price):
     return True, "；".join(messages)
 
 
+def build_operation_summary(trend_light, suggestion, false_break_risk, current_price, pressure_1, support_1, rsi, volume_ratio):
+    if "🟢" in trend_light:
+        trend_line = "🟢 趨勢偏多"
+    elif "🔴" in trend_light:
+        trend_line = "🔴 趨勢轉弱"
+    else:
+        trend_line = "🟡 趨勢觀察"
+
+    if "續抱" in suggestion:
+        action_line = "🟢 建議續抱"
+    elif "部分停利" in suggestion or "觀察" in suggestion:
+        action_line = "🟡 建議觀察 / 控制部位"
+    else:
+        action_line = "🔴 建議減碼 / 出場觀察"
+
+    if pressure_1 > 0 and current_price >= pressure_1 * 0.98:
+        zone_line = "🟡 接近壓力區"
+    elif support_1 > 0 and current_price <= support_1 * 1.02:
+        zone_line = "🔴 接近支撐防守區"
+    else:
+        zone_line = "🟢 價格位置正常"
+
+    if rsi >= 80:
+        chase_line = "🔴 RSI過熱，不建議追價"
+    elif volume_ratio < 0.8:
+        chase_line = "🟡 量縮，追價力道不足"
+    else:
+        chase_line = "🟢 動能尚可"
+
+    risk_line = false_break_risk
+
+    return f"""{trend_line}
+{action_line}
+{zone_line}
+{chase_line}
+假突破：{risk_line}"""
+
+
 def analyze_stock(stock_code, buy_price):
     code = clean_stock_code(stock_code)
 
@@ -361,7 +346,7 @@ def analyze_stock(stock_code, buy_price):
             daily_change_pct = ((current_price - previous_close) / previous_close) * 100 if previous_close > 0 else 0
             profit_pct = ((current_price - buy_price) / buy_price) * 100
 
-            return f"""LINE股票機器人 V3.2 專業排版優化版
+            return f"""LINE股票機器人 V3.3 專業視覺強化版
 
 股票：{code} {stock_name}
 即時來源：{realtime.get("source")}
@@ -388,8 +373,7 @@ def analyze_stock(stock_code, buy_price):
             "上櫃股票：6488.TWO 100"
         )
 
-    yahoo_close_raw = data["Close"].squeeze()
-    yahoo_price = safe_float(yahoo_close_raw.iloc[-1])
+    yahoo_price = safe_float(data["Close"].squeeze().iloc[-1])
     data = patch_history_with_realtime(data, realtime)
 
     try:
@@ -406,8 +390,7 @@ def analyze_stock(stock_code, buy_price):
         ma20 = safe_float(close.rolling(20).mean().iloc[-1])
         ma60 = safe_float(close.rolling(60).mean().iloc[-1])
 
-        rsi_series = calculate_rsi(close)
-        rsi = safe_float(rsi_series.iloc[-1])
+        rsi = safe_float(calculate_rsi(close).iloc[-1])
 
         recent_high_20 = safe_float(high.iloc[-20:].max())
         recent_low_20 = safe_float(low.iloc[-20:].min())
@@ -426,7 +409,7 @@ def analyze_stock(stock_code, buy_price):
 
     if not ok:
         return (
-            f"LINE股票機器人 V3.2 專業排版優化版\n\n"
+            f"LINE股票機器人 V3.3 專業視覺強化版\n\n"
             f"股票：{code} {stock_name}\n"
             f"買入價：{buy_price:.2f}\n"
             f"目前價：{current_price:.2f}\n\n"
@@ -441,7 +424,6 @@ def analyze_stock(stock_code, buy_price):
     basic_stop_loss = buy_price * 0.93
     take_profit_1 = buy_price * 1.08
     take_profit_2 = buy_price * 1.15
-
     trailing_profit_1 = recent_high_20 * 0.95
     trailing_profit_2 = recent_high_20 * 0.90
     ma_stop_loss = ma20
@@ -628,13 +610,21 @@ def analyze_stock(stock_code, buy_price):
         suggestion = "🔴 出場觀察"
         suggestion_detail = "AI分數偏低，技術面轉弱"
 
+    operation_summary = build_operation_summary(
+        trend_light,
+        suggestion,
+        false_break_risk,
+        current_price,
+        pressure_1,
+        support_1,
+        rsi,
+        volume_ratio
+    )
+
     realtime_source = realtime.get("source") if realtime.get("success") else "Yahoo備援"
     realtime_time = realtime.get("time", "")
 
-    # ============================================================
-    # V3.2 專業排版順序
-    # ============================================================
-    reply = f"""LINE股票機器人 V3.2 專業排版優化版
+    reply = f"""LINE股票機器人 V3.3 專業視覺強化版
 
 股票：{code} {stock_name}
 資料來源：{realtime_source}
@@ -645,6 +635,9 @@ def analyze_stock(stock_code, buy_price):
 今日漲跌：約 {daily_change_pct:.2f}%
 目前損益：約 {profit_pct:.2f}%
 
+【今日操作摘要】
+{operation_summary}
+
 【防錯價引擎】
 {guard_message}
 
@@ -653,23 +646,23 @@ def analyze_stock(stock_code, buy_price):
 漲跌停狀態：{limit_status}
 
 【支撐壓力】
-支撐1：約 {support_1:.2f}
-支撐2：約 {support_2:.2f}
-壓力1：約 {pressure_1:.2f}
-壓力2：約 {pressure_2:.2f}
+🟢 支撐1：約 {support_1:.2f}
+🟢 支撐2：約 {support_2:.2f}
+🔴 壓力1：約 {pressure_1:.2f}
+🔴 壓力2：約 {pressure_2:.2f}
 
 【停損】
-基本停損：{basic_stop_loss:.2f}
-均線停損：{ma_stop_loss:.2f}
+🔴 基本停損：{basic_stop_loss:.2f}
+🟡 均線停損：{ma_stop_loss:.2f}
 
 【停利】
-停利目標1：{take_profit_1:.2f}
-停利目標2：{take_profit_2:.2f}
+🟢 停利目標1：{take_profit_1:.2f}
+🟢 停利目標2：{take_profit_2:.2f}
 
 【移動停利】
-近20日高點：{recent_high_20:.2f}
-移動停利1：{trailing_profit_1:.2f}
-移動停利2：{trailing_profit_2:.2f}
+📈 近20日高點：{recent_high_20:.2f}
+🟡 移動停利1：{trailing_profit_1:.2f}
+🔴 移動停利2：{trailing_profit_2:.2f}
 
 【建議】
 {suggestion}
@@ -804,7 +797,7 @@ def stock_pick_message():
             results.append(item)
 
     if not results:
-        return """LINE股票機器人 V3.2 專業排版優化版
+        return """LINE股票機器人 V3.3 專業視覺強化版
 
 目前選股資料暫時抓取失敗。
 請稍後再輸入：選股
@@ -815,7 +808,7 @@ def stock_pick_message():
     today = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     lines = []
-    lines.append("LINE股票機器人 V3.2 專業排版優化版")
+    lines.append("LINE股票機器人 V3.3 專業視覺強化版")
     lines.append("")
     lines.append("【今日AI強勢股觀察】")
     lines.append(f"時間：{today}")
@@ -824,8 +817,15 @@ def stock_pick_message():
     lines.append("")
 
     for idx, item in enumerate(top_results, start=1):
+        if item["score"] >= 6:
+            rank_light = "🟢"
+        elif item["score"] >= 4:
+            rank_light = "🟡"
+        else:
+            rank_light = "🔴"
+
         lines.append(
-            f"{idx}. {item['code']} {item['name']}\n"
+            f"{idx}. {rank_light} {item['code']} {item['name']}\n"
             f"價：{item['price']:.2f}｜漲跌：{item['change']:.2f}%\n"
             f"分數：{item['score']}/7｜RSI：{item['rsi']:.1f}｜量比：{item['volume_ratio']:.2f}\n"
             f"假突破風險：{item['risk']}\n"
@@ -872,7 +872,7 @@ def reply_message(reply_token, text):
 
 @app.route("/", methods=["GET"])
 def home():
-    return "LINE股票機器人 V3.2 專業排版優化版 正常運行中"
+    return "LINE股票機器人 V3.3 專業視覺強化版 正常運行中"
 
 
 @app.route("/callback", methods=["POST"])
@@ -893,7 +893,7 @@ def callback():
             user_text = event["message"]["text"].strip()
 
             if user_text.lower() in ["help", "說明", "使用說明"]:
-                help_text = """LINE股票機器人 V3.2 專業排版優化版
+                help_text = """LINE股票機器人 V3.3 專業視覺強化版
 
 使用方式一：
 輸入 股票代碼 買入價
@@ -907,14 +907,13 @@ def callback():
 輸入：
 選股
 
-V3.2重點：
-1. 交易決策優先排版
-2. 趨勢燈號改成 🟢🟡🔴
-3. 股票名稱確認
-4. 防錯價引擎
-5. 支撐壓力優先顯示
-6. 停損 / 停利 / 移動停利優先顯示
-7. AI分數與技術細節放後方
+V3.3重點：
+1. 新增今日操作摘要
+2. 支撐壓力加入圖示
+3. 停損 / 停利 / 移動停利加入圖示
+4. 趨勢燈號 🟢🟡🔴
+5. 假突破風險視覺化
+6. AI強勢股排行加入燈號
 """
                 reply_message(reply_token, help_text)
                 continue
