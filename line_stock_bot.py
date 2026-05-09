@@ -380,6 +380,10 @@ def analyze_stop_profit(user_text: str) -> str:
         return f"{code} {stock_name} 資料不足，暫時無法分析。"
 
     latest_close = safe_float(close.iloc[-1])
+    prev_close = safe_float(close.iloc[-2]) if len(close) >= 2 else latest_close
+    today_change_pct = ((latest_close - prev_close) / prev_close * 100) if prev_close else 0.0
+    profit_loss_pct = ((latest_close - buy_price) / buy_price * 100) if buy_price else 0.0
+
     ma5 = safe_float(close.rolling(5).mean().iloc[-1])
     ma10 = safe_float(close.rolling(10).mean().iloc[-1])
     ma20 = safe_float(close.rolling(20).mean().iloc[-1])
