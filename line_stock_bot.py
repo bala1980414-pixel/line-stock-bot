@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-LINE 股票機器人 V4.2-Lite 低追高倍量版
-用途：部署在 Render，LINE 輸入「選股」回傳低追高優先股、提前布局、今日強勢股。
+LINE 股票機器人 V4.3-Lite 極簡版
+用途：部署在 Render，LINE 輸入「選股」回傳極簡版多頭續強、低位布局、倍量異動。
 也支援：輸入「股票代碼 買入價」或「2330 800」回傳停損/停利。
 
 Render Start Command：gunicorn line_stock_bot:app
@@ -26,10 +26,10 @@ from flask import Flask, request, abort
 
 
 # ============================================================
-# LINE 股票機器人 V4.2-Lite 低追高倍量版
+# LINE 股票機器人 V4.3-Lite 極簡版
 # ============================================================
 
-VERSION_NAME = "LINE 股票機器人 V4.2-Lite 低追高倍量版"
+VERSION_NAME = "LINE 股票機器人 V4.3-Lite 極簡版"
 
 CHANNEL_ACCESS_TOKEN = os.getenv("CHANNEL_ACCESS_TOKEN", "")
 CHANNEL_SECRET = os.getenv("CHANNEL_SECRET", "")
@@ -39,7 +39,6 @@ app = Flask(__name__)
 
 # ============================================================
 # 股票清單：全電子 + 重電核心觀察
-# 可自行增減
 # ============================================================
 
 STOCK_POOL = {
@@ -73,11 +72,14 @@ STOCK_POOL = {
 # ============================================================
 
 def tw_now() -> datetime:
-    """台灣時間"""
     return datetime.now(ZoneInfo("Asia/Taipei"))
 
 
 def fmt_time() -> str:
+    return tw_now().strftime("%m/%d %H:%M")
+
+
+def fmt_full_time() -> str:
     return tw_now().strftime("%Y-%m-%d %H:%M:%S")
 
 
@@ -104,30 +106,37 @@ def calc_rsi(close: pd.Series, period: int = 14) -> pd.Series:
     delta = close.diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
+
     avg_gain = gain.rolling(period).mean()
     avg_loss = loss.rolling(period).mean()
+
     rs = avg_gain / avg_loss.replace(0, pd.NA)
-    return 100 - (100 / (1 + rs))
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.fillna(50)
 
 
 def fetch_stock_data(code: str, period: str = "90d") -> pd.DataFrame:
-    df = yf.download(
-        to_yf_symbol(code),
-        period=period,
-        interval="1d",
-        progress=False,
-        auto_adjust=False,
-        threads=False,
-    )
+    try:
+        df = yf.download(
+            to_yf_symbol(code),
+            period=period,
+            interval="1d",
+            progress=False,
+            auto_adjust=False,
+            threads=False,
+        )
 
-    if df is None or df.empty:
+        if df is None or df.empty:
+            return pd.DataFrame()
+
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = [c[0] for c in df.columns]
+
+        df = df.dropna(subset=["Close", "Volume"])
+        return df
+
+    except Exception:
         return pd.DataFrame()
-
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = [c[0] for c in df.columns]
-
-    df = df.dropna(subset=["Close", "Volume"])
-    return df
 
 
 def calc_volume_power(df: pd.DataFrame) -> dict:
@@ -169,6 +178,7 @@ def calc_volume_power(df: pd.DataFrame) -> dict:
 
 def calc_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
+
     df["MA5"] = df["Close"].rolling(5).mean()
     df["MA10"] = df["Close"].rolling(10).mean()
     df["MA20"] = df["Close"].rolling(20).mean()
@@ -179,12 +189,11 @@ def calc_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["MACD"] = ema12 - ema26
     df["MACD_SIGNAL"] = df["MACD"].ewm(span=9, adjust=False).mean()
 
-    df["HIGH20"] = df["High"].rolling(20).max()
     return df
 
 
 # ============================================================
-# V4.2 選股核心：低追高 + 左右倍量 + 量價判斷
+# V4.3 選股核心：低追高 + 左右倍量 + 極簡回傳
 # ============================================================
 
 def analyze_candidate(code: str, name: str) -> dict | None:
@@ -193,12 +202,12 @@ def analyze_candidate(code: str, name: str) -> dict | None:
         return None
 
     df = calc_indicators(df)
+
     last = df.iloc[-1]
     prev = df.iloc[-2]
 
     close = safe_float(last["Close"])
     prev_close = safe_float(prev["Close"])
-    high = safe_float(last["High"])
     ma5 = safe_float(last["MA5"])
     ma10 = safe_float(last["MA10"])
     ma20 = safe_float(last["MA20"])
@@ -219,34 +228,24 @@ def analyze_candidate(code: str, name: str) -> dict | None:
     right_ratio = vol["right_volume_ratio"]
 
     score = 0
-    tags = []
 
     if ma5 > ma10 > ma20:
         score += 1
-        tags.append("均線多頭")
     if close > prev_close:
         score += 1
-        tags.append("今日上漲")
     if 50 <= rsi <= 75:
         score += 1
-        tags.append("RSI健康強勢")
     elif rsi > 80:
         score -= 1
-        tags.append("RSI過熱")
     if macd > macd_signal:
         score += 1
-        tags.append("MACD偏多")
     if high20_break:
         score += 1
-        tags.append("突破20日高")
     if left_ratio >= 1.3:
         score += 1
-        tags.append("左倍量")
     if right_ratio >= 1.3:
         score += 1
-        tags.append("右倍量")
 
-    # 低追高控制：漲太多、乖離太高、RSI太熱，降低排序
     chase_risk = "低"
     if change_pct >= 6 or ma20_bias >= 12 or rsi >= 80:
         chase_risk = "高"
@@ -255,39 +254,66 @@ def analyze_candidate(code: str, name: str) -> dict | None:
         chase_risk = "中"
         score -= 1
 
-    if left_ratio >= 1.5 and right_ratio >= 1.5 and change_pct <= 5:
+    # 量價判斷
+    if close < prev_close and left_ratio >= 1.5 and right_ratio >= 1.5:
+        price_volume = "下跌放量，需防賣壓"
+    elif close < prev_close and right_ratio >= 1.3:
+        price_volume = "量增價弱，可能有賣壓"
+    elif left_ratio >= 1.5 and right_ratio >= 1.5 and change_pct <= 5:
         price_volume = "價漲量增，強勢但仍需控追高"
     elif close > prev_close and right_ratio < 1:
         price_volume = "價漲量縮，續航需觀察"
-    elif close < prev_close and right_ratio >= 1.3:
-        price_volume = "量增價弱，可能有賣壓"
     elif abs(change_pct) <= 1.5 and right_ratio >= 1.2:
         price_volume = "量先出、價未大漲，偏低追高觀察"
     else:
         price_volume = vol["volume_judgement"]
 
+    # 分類名稱：V4.3 極簡版
     if score >= 5 and chase_risk != "高":
-        strategy = "突破追強"
+        strategy = "多頭續強"
     elif score >= 3 and change_pct <= 3.5 and ma5 >= ma10 and right_ratio >= 1.0:
-        strategy = "提前布局"
+        strategy = "低位布局"
+    elif right_ratio >= 1.3 and chase_risk != "高":
+        strategy = "倍量異動"
     elif score >= 3 and change_pct <= 5:
-        strategy = "今日強勢"
+        strategy = "多頭續強"
     else:
         strategy = "觀察"
+
+    # LINE 顯示用燈號
+    if chase_risk == "低":
+        icon = "🟢"
+    elif chase_risk == "中":
+        icon = "🟡"
+    else:
+        icon = "🔴"
+
+    # LINE 短標籤
+    if close < prev_close and right_ratio >= 1.3:
+        short_tag = "量增價弱"
+    elif abs(change_pct) <= 1.5 and right_ratio >= 1.2:
+        short_tag = "低位倍量"
+    elif chase_risk == "低":
+        short_tag = "低追高"
+    elif chase_risk == "中":
+        short_tag = "追高風險中"
+    else:
+        short_tag = "追高風險高"
 
     return {
         "code": code,
         "name": name,
         "close": round(close, 2),
         "change_pct": change_pct,
-        "score": score,
+        "score": int(score),
         "strategy": strategy,
         "rsi": round(rsi, 1),
         "left_volume_ratio": left_ratio,
         "right_volume_ratio": right_ratio,
         "price_volume": price_volume,
         "chase_risk": chase_risk,
-        "tags": "、".join(tags[:5]) if tags else "無明顯訊號",
+        "icon": icon,
+        "short_tag": short_tag,
     }
 
 
@@ -309,41 +335,66 @@ def pick_stocks() -> str:
             "目前抓不到有效選股資料，可能是 Yahoo Finance 暫時無資料或非交易時段。"
         )
 
+    def risk_score(x):
+        return {"低": 2, "中": 1, "高": 0}.get(x["chase_risk"], 1)
+
     results = sorted(
         results,
-        key=lambda x: (x["score"], -{"低": 0, "中": 1, "高": 2}.get(x["chase_risk"], 1), x["right_volume_ratio"]),
+        key=lambda x: (x["score"], risk_score(x), x["right_volume_ratio"]),
         reverse=True,
     )
 
-    strong = [x for x in results if x["strategy"] in ("突破追強", "今日強勢") and x["chase_risk"] != "高"][:5]
-    early = [x for x in results if x["strategy"] == "提前布局" and x["chase_risk"] != "高"][:5]
-    volume_watch = [x for x in results if x["right_volume_ratio"] >= 1.3 and x["chase_risk"] != "高"][:5]
+    multi = [x for x in results if x["strategy"] == "多頭續強" and x["chase_risk"] != "高"][:5]
+    low = [x for x in results if x["strategy"] == "低位布局" and x["chase_risk"] != "高"][:5]
+    volume = [x for x in results if x["right_volume_ratio"] >= 1.3 and x["chase_risk"] != "高"][:5]
+
+    # 若區塊不足，補入合理觀察名單，避免空白太多
+    if len(multi) < 5:
+        exists = {x["code"] for x in multi}
+        multi += [
+            x for x in results
+            if x["code"] not in exists and x["score"] >= 3 and x["chase_risk"] != "高"
+        ][:5 - len(multi)]
+
+    if len(low) < 5:
+        exists = {x["code"] for x in low}
+        low += [
+            x for x in results
+            if x["code"] not in exists
+            and x["score"] >= 3
+            and x["change_pct"] <= 3.5
+            and x["chase_risk"] != "高"
+        ][:5 - len(low)]
+
+    if len(volume) < 5:
+        exists = {x["code"] for x in volume}
+        volume += [
+            x for x in results
+            if x["code"] not in exists and x["right_volume_ratio"] >= 1.0 and x["chase_risk"] != "高"
+        ][:5 - len(volume)]
 
     def block(title: str, rows: list[dict]) -> str:
         if not rows:
             return f"{title}\n目前沒有符合條件。"
+
         lines = [title]
-        for i, x in enumerate(rows, 1):
+        for x in rows:
             lines.append(
-                f"{i}. {x['code']} {x['name']}｜收盤 {x['close']}｜漲跌 {x['change_pct']}%\n"
-                f"   分數 {x['score']}｜RSI {x['rsi']}｜追高風險：{x['chase_risk']}\n"
-                f"   左倍量 {x['left_volume_ratio']}｜右倍量 {x['right_volume_ratio']}\n"
-                f"   量價判斷：{x['price_volume']}"
+                f"{x['icon']} {x['code']} {x['name']}\n"
+                f"分數{x['score']}｜右倍量{x['right_volume_ratio']}｜{x['short_tag']}\n"
+                f"{x['price_volume']}"
             )
-        return "\n".join(lines)
+        return "\n\n".join(lines)
 
     msg = [
         VERSION_NAME,
         f"資料時間：{fmt_time()}（台灣時間）",
         "",
-        "【低追高提醒】",
-        "優先看：漲幅不過大、右倍量放大、RSI未過熱、均線仍偏多。",
+        block("【多頭續強 TOP5】", multi),
         "",
-        block("【今日強勢股 TOP5】", strong),
+        block("【低位布局 TOP5】", low),
         "",
-        block("【提前布局 TOP5】", early),
-        "",
-        block("【倍量觀察 TOP5】", volume_watch),
+        block("【倍量異動 TOP5】", volume),
         "",
         "※ 左倍量＝今日量 / 昨日量",
         "※ 右倍量＝今日量 / 近5日均量",
@@ -354,16 +405,18 @@ def pick_stocks() -> str:
 
 
 # ============================================================
-# 股票代碼 + 買入價：改回 V4-Lite 正式修正版格式
+# 股票代碼 + 買入價：保留 V4-Lite 正式修正版格式
 # ============================================================
 
 def analyze_buy_price(code: str, buy_price: float) -> str:
     name = STOCK_POOL.get(code, "")
     df = fetch_stock_data(code)
+
     if df.empty or len(df) < 30:
         return f"查無 {code} 的有效資料，請確認股票代碼是否正確。"
 
     df = calc_indicators(df)
+
     last = df.iloc[-1]
     prev = df.iloc[-2]
 
@@ -413,7 +466,7 @@ def analyze_buy_price(code: str, buy_price: float) -> str:
 
     return (
         f"{VERSION_NAME}\n"
-        f"資料時間：{fmt_time()}（台灣時間）\n\n"
+        f"資料時間：{fmt_full_time()}（台灣時間）\n\n"
         f"【股票分析】\n"
         f"{code} {name}\n"
         f"買入價：{buy_price}\n"
@@ -453,7 +506,13 @@ def analyze_buy_price(code: str, buy_price: float) -> str:
 def verify_signature(body: bytes, signature: str) -> bool:
     if not CHANNEL_SECRET:
         return False
-    digest = hmac.new(CHANNEL_SECRET.encode("utf-8"), body, hashlib.sha256).digest()
+
+    digest = hmac.new(
+        CHANNEL_SECRET.encode("utf-8"),
+        body,
+        hashlib.sha256,
+    ).digest()
+
     valid_signature = base64.b64encode(digest).decode("utf-8")
     return hmac.compare_digest(valid_signature, signature)
 
@@ -463,6 +522,7 @@ def reply_line(reply_token: str, text: str) -> None:
         return
 
     url = "https://api.line.me/v2/bot/message/reply"
+
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {CHANNEL_ACCESS_TOKEN}",
@@ -473,7 +533,12 @@ def reply_line(reply_token: str, text: str) -> None:
 
     payload = {
         "replyToken": reply_token,
-        "messages": [{"type": "text", "text": text}],
+        "messages": [
+            {
+                "type": "text",
+                "text": text,
+            }
+        ],
     }
 
     requests.post(url, headers=headers, json=payload, timeout=10)
@@ -495,7 +560,7 @@ def handle_text(text: str) -> str:
     if code and text == code:
         return (
             f"{VERSION_NAME}\n"
-            f"資料時間：{fmt_time()}（台灣時間）\n\n"
+            f"資料時間：{fmt_full_time()}（台灣時間）\n\n"
             "請輸入格式：股票代碼 買入價\n"
             "例如：2330 800\n\n"
             "或輸入：選股"
@@ -503,7 +568,7 @@ def handle_text(text: str) -> str:
 
     return (
         f"{VERSION_NAME}\n"
-        f"資料時間：{fmt_time()}（台灣時間）\n\n"
+        f"資料時間：{fmt_full_time()}（台灣時間）\n\n"
         "可用指令：\n"
         "1. 選股\n"
         "2. 股票代碼 買入價，例如：2330 800"
@@ -512,7 +577,7 @@ def handle_text(text: str) -> str:
 
 @app.route("/", methods=["GET"])
 def home():
-    return f"{VERSION_NAME} is running. Taiwan time: {fmt_time()}"
+    return f"{VERSION_NAME} is running. Taiwan time: {fmt_full_time()}"
 
 
 @app.route("/callback", methods=["POST"])
@@ -530,6 +595,7 @@ def callback():
         for event in events:
             if event.get("type") != "message":
                 continue
+
             message = event.get("message", {})
             if message.get("type") != "text":
                 continue
@@ -551,8 +617,12 @@ def callback():
 if __name__ == "__main__":
     print("=" * 60)
     print(VERSION_NAME)
-    print(f"台灣時間：{fmt_time()}")
+    print(f"台灣時間：{fmt_full_time()}")
     print("本機測試網址：http://127.0.0.1:5000")
     print("Webhook網址：https://你的Render網址/callback")
     print("=" * 60)
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
+
+    app.run(
+        host="0.0.0.0",
+        port=int(os.getenv("PORT", 5000)),
+    )
