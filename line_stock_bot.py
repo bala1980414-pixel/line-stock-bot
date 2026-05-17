@@ -1,10 +1,18 @@
 # -*- coding: utf-8 -*-
 """
-LINE 股票機器人 V4.4 主力進貨版
+LINE 股票機器人 V4.4-Pro 真正優化版
 用途：部署在 Render，LINE 輸入「選股」回傳：主力進貨TOP5、市場熱門TOP5、波段續強TOP5。
 也支援：輸入「股票代碼 買進價」或「2330 800」回傳停損/停利。
 
-Render Start Command：gunicorn line_stock_bot:app
+本版重點：
+- 選股資料時間改為台灣時間 Asia/Taipei
+- 主力進貨：加入適合度、AI評語、過熱過濾
+- 市場熱門：加入追價警示
+- 波段續強：加入波段健康度、乖離燈號
+- 同時上榜：標示雙榜共振 / 三榜共振
+
+Render Start Command：gunicorn line_stock_bot_v4_4_pro:app
+若 Render 仍使用 line_stock_bot:app，請把本檔內容覆蓋回 line_stock_bot.py。
 Environment Variables：
 - CHANNEL_ACCESS_TOKEN
 - CHANNEL_SECRET
@@ -17,7 +25,7 @@ import hmac
 import base64
 import hashlib
 import traceback
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 
 import requests
 import pandas as pd
@@ -32,7 +40,6 @@ LINE_REPLY_URL = "https://api.line.me/v2/bot/message/reply"
 
 # ============================================================
 # 股票池：台股電子 + 重電核心名單
-# 之後若要加股票，直接在這裡增加即可
 # ============================================================
 STOCK_POOL = {
     # 半導體 / IC / AI
@@ -93,7 +100,7 @@ def reply_text(reply_token: str, text: str):
 
 @app.route("/", methods=["GET"])
 def home():
-    return "LINE 股票機器人 V4.4 主力進貨版 is running."
+    return "LINE 股票機器人 V4.4-Pro 真正優化版 is running."
 
 
 @app.route("/callback", methods=["POST"])
@@ -132,6 +139,12 @@ def callback():
 # ============================================================
 # 技術指標
 # ============================================================
+def tw_now_str() -> str:
+    # 不依賴 pytz，避免 Render 沒安裝 pytz。台灣固定 UTC+8。
+    tw_tz = timezone(timedelta(hours=8))
+    return datetime.now(tw_tz).strftime("%Y-%m-%d %H:%M（台灣時間）")
+
+
 def tw_symbol(code: str) -> str:
     return f"{code}.TW"
 
@@ -177,7 +190,6 @@ def analyze_stock(code: str, name: str):
     close = df["Close"]
     volume = df["Volume"]
     high = df["High"]
-    low = df["Low"]
     open_ = df["Open"]
 
     last = df.iloc[-1]
@@ -187,39 +199,38 @@ def analyze_stock(code: str, name: str):
     ma10 = close.rolling(10).mean().iloc[-1]
     ma20 = close.rolling(20).mean().iloc[-1]
     ma60 = close.rolling(60).mean().iloc[-1] if len(df) >= 60 else ma20
-    vol5 = volume.rolling(5).mean().iloc[-1]
     vol20 = volume.rolling(20).mean().iloc[-1]
+    prev_vol20 = volume.rolling(20).mean().iloc[-2]
     rsi = calc_rsi(close).iloc[-1]
 
     c = safe_float(last["Close"])
     o = safe_float(last["Open"])
     h = safe_float(last["High"])
-    l = safe_float(last["Low"])
     v = safe_float(last["Volume"])
     pc = safe_float(prev["Close"])
+    po = safe_float(prev["Open"])
     pv = safe_float(prev["Volume"])
 
     change_pct = ((c - pc) / pc * 100) if pc else 0
     vol_ratio = (v / vol20) if vol20 else 0
-    prev_vol_ratio = (pv / volume.rolling(20).mean().iloc[-2]) if volume.rolling(20).mean().iloc[-2] else 0
+    prev_vol_ratio = (pv / prev_vol20) if prev_vol20 else 0
 
     is_red = c > o
-    prev_is_red = safe_float(prev["Close"]) > safe_float(prev["Open"])
+    prev_is_red = pc > po
     same_color_2 = (is_red == prev_is_red)
-
-    # 左倍量：昨日或前一根先出現倍量，今日仍維持同色K，代表可能不是今天才追右側爆量
-    left_volume = prev_vol_ratio >= 1.5 and same_color_2 and c >= ma10 and ma5 >= ma10
-    # 右倍量：今日爆量上漲，市場熱門，但較容易已在右側
-    right_volume = vol_ratio >= 1.5 and change_pct > 0 and c > ma5
-    # 波段續強：多頭排列 + 未過熱失控 + 趨勢延續
-    trend_continue = ma5 > ma10 > ma20 and c > ma20 and change_pct > -1.5
 
     high20_prev = high.shift(1).rolling(20).max().iloc[-1]
     breakout20 = c > high20_prev
-
     upper_shadow = ((h - max(c, o)) / c * 100) if c else 0
-    lower_shadow = ((min(c, o) - l) / c * 100) if c else 0
     deviation20 = ((c - ma20) / ma20 * 100) if ma20 else 0
+    deviation10 = ((c - ma10) / ma10 * 100) if ma10 else 0
+
+    # 左倍量：前一根先放量 + 兩根同色 + 今日仍維持多頭
+    left_volume = prev_vol_ratio >= 1.5 and same_color_2 and c >= ma10 and ma5 >= ma10
+    # 右倍量：今日爆量上漲，偏人氣/右側
+    right_volume = vol_ratio >= 1.5 and change_pct > 0 and c > ma5
+    # 波段續強：多頭排列，趨勢未破壞
+    trend_continue = ma5 > ma10 > ma20 and c > ma20 and change_pct > -1.5
 
     fake_risk = "低"
     if vol_ratio >= 2.0 and upper_shadow >= 3 and change_pct < 1:
@@ -227,51 +238,98 @@ def analyze_stock(code: str, name: str):
     elif rsi >= 78 or deviation20 >= 12 or upper_shadow >= 2.2:
         fake_risk = "中"
 
-    main_force_score = 0
-    if left_volume: main_force_score += 3
-    if ma5 >= ma10 >= ma20: main_force_score += 2
-    if 45 <= rsi <= 72: main_force_score += 2
-    if c >= ma20: main_force_score += 1
-    if change_pct > 0: main_force_score += 1
-    if fake_risk == "高": main_force_score -= 2
+    layout_score = 0
+    if left_volume: layout_score += 30
+    if ma5 >= ma10 >= ma20: layout_score += 20
+    if 50 <= rsi <= 70: layout_score += 20
+    elif 45 <= rsi < 50 or 70 < rsi <= 75: layout_score += 10
+    if 0 <= deviation20 <= 8: layout_score += 20
+    elif 8 < deviation20 <= 12: layout_score += 8
+    if 0 <= change_pct <= 3.5: layout_score += 10
+    if fake_risk == "高": layout_score -= 25
+    if rsi >= 80 or deviation20 >= 15: layout_score -= 20
+    layout_score = max(0, min(100, int(layout_score)))
+
+    if layout_score >= 75 and fake_risk == "低":
+        suitability = "🟢 適合提前布局"
+    elif layout_score >= 60 and fake_risk != "高":
+        suitability = "🟡 可觀察拉回"
+    else:
+        suitability = "🔴 偏熱勿追"
+
+    if rsi >= 80 or deviation20 >= 12:
+        chase_warning = "⚠ 右側偏熱"
+    elif change_pct >= 5 or vol_ratio >= 3:
+        chase_warning = "⚠ 勿追高"
+    else:
+        chase_warning = "🟡 僅適合短線觀察"
+
+    if 50 <= rsi <= 75 and 0 <= deviation20 <= 8:
+        trend_health = "🟢 健康續強"
+    elif 75 < rsi <= 80 or 8 < deviation20 <= 12:
+        trend_health = "🟡 偏熱續強"
+    else:
+        trend_health = "🔴 過熱觀察"
+
+    main_force_score = layout_score
 
     hot_score = 0
-    if right_volume: hot_score += 3
-    if change_pct > 0: hot_score += 2
-    if breakout20: hot_score += 2
-    if ma5 > ma10 > ma20: hot_score += 1
-    if rsi >= 80: hot_score -= 1
-    if fake_risk == "高": hot_score -= 2
+    if right_volume: hot_score += 35
+    if change_pct > 0: hot_score += 20
+    if breakout20: hot_score += 20
+    if ma5 > ma10 > ma20: hot_score += 10
+    if vol_ratio >= 2: hot_score += 10
+    if fake_risk == "高": hot_score -= 20
+    hot_score = max(0, min(100, int(hot_score)))
 
     trend_score = 0
-    if trend_continue: trend_score += 3
-    if ma5 > ma10 > ma20: trend_score += 2
-    if c > ma60: trend_score += 1
-    if 50 <= rsi <= 78: trend_score += 2
-    if vol_ratio >= 1.0: trend_score += 1
-    if deviation20 >= 15: trend_score -= 2
-    if fake_risk == "高": trend_score -= 2
+    if trend_continue: trend_score += 30
+    if ma5 > ma10 > ma20: trend_score += 25
+    if c > ma60: trend_score += 10
+    if 50 <= rsi <= 75: trend_score += 20
+    if 0 <= deviation20 <= 8: trend_score += 15
+    elif 8 < deviation20 <= 12: trend_score += 5
+    if deviation20 >= 15: trend_score -= 25
+    if fake_risk == "高": trend_score -= 25
+    trend_score = max(0, min(100, int(trend_score)))
+
+    reasons = []
+    if left_volume:
+        reasons.append("主力量能提前增溫")
+    if 50 <= rsi <= 70:
+        reasons.append("RSI尚未過熱")
+    if 0 <= deviation20 <= 8:
+        reasons.append("離月線不遠")
+    if ma5 >= ma10 >= ma20:
+        reasons.append("均線多頭排列")
+    if not reasons:
+        reasons.append("條件普通，等待更明確訊號")
 
     return {
         "code": code,
         "name": name,
         "close": c,
-        "change_pct": change_pct,
+        "change_pct": safe_float(change_pct),
         "rsi": safe_float(rsi),
         "vol_ratio": safe_float(vol_ratio),
         "prev_vol_ratio": safe_float(prev_vol_ratio),
-        "left_volume": left_volume,
-        "right_volume": right_volume,
-        "trend_continue": trend_continue,
+        "left_volume": bool(left_volume),
+        "right_volume": bool(right_volume),
+        "trend_continue": bool(trend_continue),
         "fake_risk": fake_risk,
         "main_force_score": main_force_score,
         "hot_score": hot_score,
         "trend_score": trend_score,
         "deviation20": safe_float(deviation20),
+        "deviation10": safe_float(deviation10),
+        "suitability": suitability,
+        "chase_warning": chase_warning,
+        "trend_health": trend_health,
+        "reasons": reasons,
     }
 
 # ============================================================
-# 選股回覆：V4.4 主力進貨版
+# 選股回覆：V4.4-Pro 真正優化版
 # ============================================================
 def build_selection_reply():
     rows = []
@@ -287,70 +345,86 @@ def build_selection_reply():
     if not rows:
         return "目前抓不到 Yahoo 股價資料，請稍後再試。"
 
-    # 主力進貨：以左倍量為主，排除高假突破風險
-    main_force = [r for r in rows if r["left_volume"] and r["fake_risk"] != "高"]
-    main_force = sorted(main_force, key=lambda x: (x["main_force_score"], x["prev_vol_ratio"], -abs(x["change_pct"])), reverse=True)[:5]
+    # 主力進貨：左倍量 + 排除高風險 + 避免過熱乖離太大
+    main_force = [
+        r for r in rows
+        if r["left_volume"] and r["fake_risk"] != "高" and r["rsi"] < 80 and r["deviation20"] <= 13
+    ]
+    main_force = sorted(main_force, key=lambda x: (x["main_force_score"], x["prev_vol_ratio"], -x["deviation20"]), reverse=True)[:5]
 
-    # 市場熱門：今日右倍量人氣股
+    # 市場熱門：今日右倍量人氣股，允許右側，但加警示
     hot = [r for r in rows if r["right_volume"]]
     hot = sorted(hot, key=lambda x: (x["hot_score"], x["vol_ratio"], x["change_pct"]), reverse=True)[:5]
 
-    # 波段續強：趨勢延續，不一定爆量
-    trend = [r for r in rows if r["trend_continue"] and r["fake_risk"] != "高"]
-    trend = sorted(trend, key=lambda x: (x["trend_score"], x["change_pct"], -x["deviation20"]), reverse=True)[:5]
+    # 波段續強：多頭延續，以健康續強優先，避免乖離過大
+    trend = [
+        r for r in rows
+        if r["trend_continue"] and r["fake_risk"] != "高" and r["deviation20"] <= 14
+    ]
+    trend = sorted(trend, key=lambda x: (x["trend_score"], -x["deviation20"], x["change_pct"]), reverse=True)[:5]
 
-    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    board_count = {}
+    for group in (main_force, hot, trend):
+        for r in group:
+            board_count[r["code"]] = board_count.get(r["code"], 0) + 1
+
+    def resonance_tag(r):
+        c = board_count.get(r["code"], 0)
+        if c >= 3:
+            return "｜⭐ 三榜共振"
+        if c == 2:
+            return "｜⭐ 雙榜共振"
+        return ""
 
     def fmt_item(i, r, mode):
+        head = f"{i}. {r['code']} {r['name']}｜收 {r['close']:.1f}{resonance_tag(r)}"
         if mode == "main":
-            extra = f"左倍{r['prev_vol_ratio']:.2f}｜RSI {r['rsi']:.0f}｜風險{r['fake_risk']}"
-        elif mode == "hot":
-            extra = f"右倍{r['vol_ratio']:.2f}｜漲跌{r['change_pct']:.1f}%｜風險{r['fake_risk']}"
-        else:
-            extra = f"量比{r['vol_ratio']:.2f}｜RSI {r['rsi']:.0f}｜乖離{r['deviation20']:.1f}%"
-        return f"{i}. {r['code']} {r['name']}｜收 {r['close']:.1f}\n   {extra}"
+            extra = f"左倍{r['prev_vol_ratio']:.2f}｜RSI {r['rsi']:.0f}｜乖離{r['deviation20']:.1f}%｜{r['suitability']}"
+            reason = "、".join(r["reasons"][:2])
+            return f"{head}\n   {extra}\n   AI評語：{reason}"
+        if mode == "hot":
+            extra = f"右倍{r['vol_ratio']:.2f}｜漲跌{r['change_pct']:.1f}%｜風險{r['fake_risk']}｜{r['chase_warning']}"
+            return f"{head}\n   {extra}"
+        extra = f"量比{r['vol_ratio']:.2f}｜RSI {r['rsi']:.0f}｜乖離{r['deviation20']:.1f}%｜{r['trend_health']}"
+        return f"{head}\n   {extra}"
 
-    def section(title, data, mode, empty_text):
-        lines = [title]
+    def section(data, mode, empty_text):
         if not data:
-            lines.append(empty_text)
-        else:
-            for i, r in enumerate(data, 1):
-                lines.append(fmt_item(i, r, mode))
-        return "\n".join(lines)
+            return empty_text
+        return "\n".join(fmt_item(i, r, mode) for i, r in enumerate(data, 1))
 
-    text = f"""【AI選股 V4.4 主力進貨版】
+    now = tw_now_str()
+
+    text = f"""【AI選股 V4.4-Pro 真正優化版】
 資料時間：{now}
 
 ━━━━━━━━━━━━━━
-🔷 主力進貨 TOP5（左倍量）
+🔷 主力進貨 TOP5（左倍量／提前布局）
 ━━━━━━━━━━━━━━
-{section('', main_force, 'main', '目前沒有符合左倍量條件的股票。')}
+{section(main_force, 'main', '目前沒有符合左倍量提前布局條件的股票。')}
 
-說明：左倍量＝前一根已先放量，今日仍維持多頭，偏提前布局。
-
-━━━━━━━━━━━━━━
-🔥 市場熱門 TOP5（右倍量）
-━━━━━━━━━━━━━━
-{section('', hot, 'hot', '目前沒有明顯右倍量人氣股。')}
-
-說明：右倍量＝今日人氣強，但較容易已在右側，勿盲追。
+說明：左倍量＝前一根已先放量，今日仍維持多頭；本榜已排除明顯過熱與高假突破風險。
 
 ━━━━━━━━━━━━━━
-🚀 波段續強 TOP5
+🔥 市場熱門 TOP5（右倍量／人氣股）
 ━━━━━━━━━━━━━━
-{section('', trend, 'trend', '目前沒有明顯波段續強股。')}
+{section(hot, 'hot', '目前沒有明顯右倍量人氣股。')}
 
-說明：多頭排列延續，適合觀察拉回或續強機會。
+說明：右倍量＝今日人氣強，但較容易已在右側；看到⚠請避免盲目追高。
 
-提醒：這是量價篩選，不是保證獲利。進場仍需搭配停損。"""
+━━━━━━━━━━━━━━
+🚀 波段續強 TOP5（健康續強）
+━━━━━━━━━━━━━━
+{section(trend, 'trend', '目前沒有明顯波段續強股。')}
 
-    # 清掉 section 空標題造成的開頭空行
-    text = text.replace("\n\n\n", "\n\n").strip()
-    return text
+說明：優先挑多頭排列、RSI健康、乖離不過大的續強股。
+
+提醒：這是量價篩選，不是保證獲利；進場仍需搭配停損。"""
+
+    return text.strip()
 
 # ============================================================
-# 股票代碼 + 買入價：保留停損停利回覆架構
+# 股票代碼 + 買入價：保留原本停損停利回覆架構，不改格式
 # ============================================================
 def handle_price_query(user_text: str):
     m = re.match(r"^\s*(\d{4})\s+([0-9]+(?:\.[0-9]+)?)\s*$", user_text)
@@ -366,8 +440,6 @@ def handle_price_query(user_text: str):
         return f"{code} 資料取得失敗，請稍後再試。"
 
     close = df["Close"]
-    high = df["High"]
-    low = df["Low"]
     volume = df["Volume"]
     latest = safe_float(close.iloc[-1])
     prev_close = safe_float(close.iloc[-2])
@@ -458,5 +530,5 @@ MA5 {ma5:.2f} / MA10 {ma10:.2f} / MA20 {ma20:.2f}
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
-    print("LINE 股票機器人 V4.4 主力進貨版啟動中...")
+    print("LINE 股票機器人 V4.4-Pro 真正優化版啟動中...")
     app.run(host="0.0.0.0", port=port)
