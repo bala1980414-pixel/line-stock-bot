@@ -14,7 +14,8 @@ Environment Variables：
    6=選股低軌, 7=選股CoPoS, 8=選股Intel, 9=選股化學, 10=選股矽晶圓
 2. 新增主力進貨 TOP5：左倍量 / 低追高 / 提前布局優先
 3. 保留波段續強 TOP5、觀察用市場熱門 TOP5
-4. 回傳顯示：指令、族群、掃描檔數、資料時間
+4. 回傳顯示：指令、族群、掃描檔數、資料時間（台灣時間）
+5. 股票分析修正：避免「股票代碼 股票代碼」，改顯示「股票代碼 股票名稱」
 """
 
 import os
@@ -25,6 +26,7 @@ import base64
 import hashlib
 import traceback
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import requests
 import pandas as pd
@@ -125,6 +127,29 @@ COMMAND_MAP = {
     "族群熱度": ("族群熱度", "族群熱度"),
 }
 
+
+# 常用台股名稱快取：用於「股票代碼 買入價」避免顯示成 1303 1303。
+# 選股股票池沒有收錄的個股，會先查這裡；仍找不到才嘗試 yfinance info。
+COMMON_STOCK_NAMES = {
+    "1101": "台泥", "1102": "亞泥", "1216": "統一", "1301": "台塑", "1303": "南亞",
+    "1326": "台化", "1402": "遠東新", "1476": "儒鴻", "1504": "東元", "1513": "中興電",
+    "1519": "華城", "1605": "華新", "1609": "大亞", "1618": "合機", "2002": "中鋼",
+    "2207": "和泰車", "2301": "光寶科", "2303": "聯電", "2317": "鴻海", "2327": "國巨",
+    "2330": "台積電", "2344": "華邦電", "2356": "英業達", "2357": "華碩", "2368": "金像電",
+    "2376": "技嘉", "2379": "瑞昱", "2382": "廣達", "2383": "台光電", "2408": "南亞科",
+    "2454": "聯發科", "2603": "長榮", "2609": "陽明", "2615": "萬海", "2881": "富邦金",
+    "2882": "國泰金", "2883": "開發金", "2884": "玉山金", "2885": "元大金", "2886": "兆豐金",
+    "2891": "中信金", "2892": "第一金", "3006": "晶豪科", "3017": "奇鋐", "3034": "聯詠",
+    "3035": "智原", "3037": "欣興", "3062": "建漢", "3189": "景碩", "3231": "緯創",
+    "3324": "雙鴻", "3443": "創意", "3529": "力旺", "3532": "台勝科", "3596": "智易",
+    "3661": "世芯-KY", "3665": "貿聯-KY", "3711": "日月光投控", "4763": "材料-KY",
+    "4906": "正文", "4958": "臻鼎-KY", "4966": "譜瑞-KY", "5269": "祥碩", "6230": "尼得科超眾",
+    "6274": "台燿", "6285": "啟碁", "6488": "環球晶", "6531": "愛普*", "6669": "緯穎",
+    "8046": "南電", "8299": "群聯",
+}
+
+_STOCK_NAME_CACHE = {}
+
 # ============================================================
 # LINE 基礎功能
 # ============================================================
@@ -204,7 +229,11 @@ def normalize_command(text: str):
 
 
 def now_text():
-    return datetime.now().strftime("%Y-%m-%d %H:%M")
+    """Render 預設常是 UTC，這裡固定轉成台灣時間。"""
+    try:
+        return datetime.now(ZoneInfo("Asia/Taipei")).strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Asia/Taipei")).strftime("%Y-%m-%d %H:%M")
 
 
 def safe_float(x, default=0.0):
@@ -616,10 +645,29 @@ def suggestion_text(row: dict, pnl: float):
 
 
 def get_stock_name_for_code(code: str, raw_ticker: str):
-    """先用內建股票池找名稱，找不到就回傳代碼，避免查詢失敗。"""
+    """取得台股名稱：股票池 → 常用快取 → yfinance info；最後才回傳代碼。"""
     for group in STOCK_GROUPS.values():
         if raw_ticker in group:
             return group[raw_ticker]
+
+    if code in COMMON_STOCK_NAMES:
+        return COMMON_STOCK_NAMES[code]
+
+    if code in _STOCK_NAME_CACHE:
+        return _STOCK_NAME_CACHE[code]
+
+    # 非選股池個股：嘗試從 yfinance 取名稱。失敗時不影響分析。
+    try:
+        info = yf.Ticker(raw_ticker).get_info()
+        name = info.get("shortName") or info.get("longName") or info.get("displayName")
+        if name:
+            # 常見英文尾巴簡化，避免 LINE 顯示太長。
+            name = str(name).replace(" Co., Ltd.", "").replace(" CO., LTD.", "").strip()
+            _STOCK_NAME_CACHE[code] = name
+            return name
+    except Exception:
+        pass
+
     return code
 
 
@@ -636,6 +684,10 @@ def make_price_reply(code: str, buy_price: float):
 
     if not row:
         return f"{code} 目前抓不到足夠資料，請稍後再試。"
+
+    # 若分析時名稱仍是代碼，補一次股票名稱，避免顯示「1303 1303」。
+    if row.get("name") == code:
+        row["name"] = get_stock_name_for_code(code, row.get("raw_ticker", f"{code}.TW"))
 
     close = row["close"]
     pnl = (close - buy_price) / buy_price * 100 if buy_price else 0
