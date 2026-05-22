@@ -365,6 +365,9 @@ def analyze_one(ticker: str, name: str):
         "today_pct": today_pct,
         "rsi": r,
         "vol_ratio": vr,
+        "ma5": ma5v,
+        "ma10": ma10v,
+        "ma20": ma20v,
         "bias5": bias5,
         "bias20": bias20,
         "score": score,
@@ -526,7 +529,7 @@ def make_heat_reply():
 
 def help_text():
     return (
-        "【V4.4-Pro Entry Signal Final 指令表】\n"
+        "【AI Trading Lab 指令中心】\n\n"
         "0 = 族群熱度\n"
         "1 = 選股\n"
         "2 = 選股PCB\n"
@@ -538,11 +541,15 @@ def help_text():
         "8 = 選股Intel\n"
         "9 = 選股化學\n"
         "10 = 選股矽晶圓\n\n"
-        "也可直接輸入：選股、選股PCB、選股ABF、選股ASIC、選股記憶體、選股低軌、選股CoPoS、選股Intel、選股化學、選股矽晶圓。"
+        "股票分析：\n"
+        "股票代碼 買入價\n"
+        "例：2330 800"
     )
 
-
 def handle_message(text: str):
+    if text.strip().lower() == "help":
+        return help_text()
+
     cmd = normalize_command(text)
     if cmd:
         command_name, group_name = cmd
@@ -563,14 +570,70 @@ def handle_message(text: str):
 # 單股停損停利簡版，保留既有輸入習慣
 # ============================================================
 
+def trend_light(row: dict):
+    """回傳趨勢燈號文字，盡量沿用前版本語氣。"""
+    ma5 = row.get("ma5", 0)
+    ma10 = row.get("ma10", 0)
+    ma20 = row.get("ma20", 0)
+    rsi = row.get("rsi", 0)
+    pct = row.get("today_pct", 0)
+
+    if row.get("ma_bull") and pct > 0 and rsi < 78:
+        return "綠燈｜多頭續強"
+    if ma5 >= ma10 >= ma20 and rsi < 78:
+        return "黃燈｜多頭整理"
+    if ma5 < ma10 and ma10 < ma20:
+        return "紅燈｜空頭偏弱"
+    return "黃燈｜整理觀察"
+
+
+def rsi_status(rsi_value: float):
+    if rsi_value >= 80:
+        return "過熱警戒"
+    if rsi_value >= 70:
+        return "偏強但留意過熱"
+    if rsi_value >= 55:
+        return "中性偏強"
+    if rsi_value >= 45:
+        return "中性整理"
+    return "偏弱整理"
+
+
+def suggestion_text(row: dict, pnl: float):
+    rsi = row.get("rsi", 0)
+    risk = row.get("risk", "中")
+    ma_bull = row.get("ma_bull", False)
+
+    if risk == "高" or rsi >= 80:
+        return "短線偏熱，避免追高，留意分批停利或守停損"
+    if pnl <= -8:
+        return "接近停損區，先守紀律，勿攤平加碼"
+    if pnl >= 8 and rsi >= 70:
+        return "已有獲利，建議分批停利並用移動停利保護"
+    if ma_bull:
+        return "觀察整理，勿急追高"
+    return "偏整理觀察，未轉強前不建議加碼"
+
+
+def get_stock_name_for_code(code: str, raw_ticker: str):
+    """先用內建股票池找名稱，找不到就回傳代碼，避免查詢失敗。"""
+    for group in STOCK_GROUPS.values():
+        if raw_ticker in group:
+            return group[raw_ticker]
+    return code
+
+
 def make_price_reply(code: str, buy_price: float):
+    # 先抓上市 .TW；失敗再抓上櫃 .TWO，保留前版本股票分析輸入習慣。
     ticker = f"{code}.TW"
-    name = STOCK_GROUPS["全部"].get(ticker, code)
+    name = get_stock_name_for_code(code, ticker)
     row = analyze_one(ticker, name)
+
     if not row:
-        # 有些上櫃股可能是 TWO，補抓一次
         ticker2 = f"{code}.TWO"
-        row = analyze_one(ticker2, STOCK_GROUPS["全部"].get(ticker2, code))
+        name2 = get_stock_name_for_code(code, ticker2)
+        row = analyze_one(ticker2, name2)
+
     if not row:
         return f"{code} 目前抓不到足夠資料，請稍後再試。"
 
@@ -580,32 +643,44 @@ def make_price_reply(code: str, buy_price: float):
     take1 = buy_price * 1.10
     take2 = buy_price * 1.18
 
-    if row["risk"] == "高":
-        suggestion = "偏高風險，避免加碼，跌破停損要守紀律"
-    elif pnl > 8 and row["rsi"] > 74:
-        suggestion = "已有獲利且RSI偏高，可分批停利"
-    elif row["ma_bull"] and row["risk"] != "高":
-        suggestion = "趨勢仍可觀察，續抱但留意停損"
-    else:
-        suggestion = "偏觀察，未轉強前不建議加碼"
+    ma5 = row.get("ma5", 0)
+    ma10 = row.get("ma10", 0)
+    ma20 = row.get("ma20", 0)
+    moving_take1 = ma5 if ma5 else close
+    moving_take2 = ma10 if ma10 else close
 
     return (
-        f"【個股停損停利分析 V4.4】\n"
-        f"股票：{code} {row['name']}\n"
-        f"資料時間：{now_text()}\n"
-        f"目前價：約 {close:.2f}\n"
-        f"買進價：{buy_price:.2f}\n"
+        f"【股票分析】{code} {row['name']}\n\n"
+        f"【防錯價引擎】\n"
+        f"買入價：{buy_price:.2f}\n"
+        f"最新收盤：{close:.2f}\n"
+        f"今日漲跌：約 {row['today_pct']:.2f}%\n"
         f"目前損益：約 {pnl:.2f}%\n\n"
-        f"停損點：約 {stop1:.2f}\n"
+        f"【趨勢燈號】\n"
+        f"{trend_light(row)}\n\n"
+        f"【支撐壓力】\n"
+        f"MA5：{ma5:.2f}\n"
+        f"MA10：{ma10:.2f}\n"
+        f"MA20：{ma20:.2f}\n\n"
+        f"【停損】\n"
+        f"停損點1：約 {stop1:.2f}（買入價 -10%）\n"
+        f"均線支撐停損：約 {ma20:.2f}\n\n"
+        f"【停利】\n"
         f"停利點1：約 {take1:.2f}\n"
         f"停利點2：約 {take2:.2f}\n\n"
-        f"今日漲跌：{row['today_pct']:.2f}%\n"
-        f"量比：{row['vol_ratio']:.2f}\n"
-        f"RSI：{row['rsi']:.0f}\n"
-        f"假突破風險：{row['risk']}（{row['risk_reasons']}）\n"
-        f"建議：{suggestion}"
+        f"【移動停利】\n"
+        f"移動停利1：約 {moving_take1:.2f}\n"
+        f"移動停利2：約 {moving_take2:.2f}\n\n"
+        f"【建議】\n"
+        f"{suggestion_text(row, pnl)}\n\n"
+        f"【RSI過熱判斷】\n"
+        f"RSI：{row['rsi']:.1f}｜{rsi_status(row['rsi'])}\n\n"
+        f"【均線狀態】\n"
+        f"MA5 {ma5:.2f} / MA10 {ma10:.2f} / MA20 {ma20:.2f}\n\n"
+        f"【量能狀態】\n"
+        f"量比：約 {row['vol_ratio']:.2f}\n\n"
+        f"提醒：以上為技術分析輔助，不代表保證獲利。"
     )
-
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
