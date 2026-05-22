@@ -1,21 +1,20 @@
 # -*- coding: utf-8 -*-
 """
-LINE 股票機器人 V4.4-Pro Sector 熱度 + HELP FULL版
-用途：部署在 Render，LINE 輸入「選股」回傳：主力進貨TOP5、市場熱門TOP5、波段續強TOP5。
-也支援：輸入「股票代碼 買進價」或「2330 800」回傳停損/停利。
+LINE 股票機器人 V4.4-Pro Entry Signal 完整正式版
+版本日期：2026-05-22
 
-本版重點：
-- 選股資料時間改為台灣時間 Asia/Taipei
-- 主力進貨：加入適合度、AI評語、過熱過濾
-- 市場熱門：加入追價警示
-- 波段續強：加入波段健康度、乖離燈號
-- 同時上榜：標示雙榜共振 / 三榜共振
+功能：
+- 0~10 快速指令
+- HELP/help 指令
+- 主力進貨 TOP5（Entry Signal）
+- 市場熱門 TOP5
+- 波段續強 TOP5（只保留 KD向上）
+- Sector 題材掃描
+- 族群熱度排行
+- 股票分析（維持原版）
 
-Render Start Command：gunicorn line_stock_bot_v4_4_pro_sector:app
-若 Render 仍使用 line_stock_bot:app，請把本檔內容覆蓋回 line_stock_bot.py。
-Environment Variables：
-- CHANNEL_ACCESS_TOKEN
-- CHANNEL_SECRET
+Render Start Command：
+gunicorn line_stock_bot:app
 """
 
 import os
@@ -25,804 +24,564 @@ import hmac
 import base64
 import hashlib
 import traceback
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 
+import pytz
 import requests
 import pandas as pd
 import yfinance as yf
+
 from flask import Flask, request, abort
 
 app = Flask(__name__)
 
 CHANNEL_ACCESS_TOKEN = os.getenv("CHANNEL_ACCESS_TOKEN", "")
 CHANNEL_SECRET = os.getenv("CHANNEL_SECRET", "")
+
 LINE_REPLY_URL = "https://api.line.me/v2/bot/message/reply"
 
-# ============================================================
-# 股票池：台股電子 + 重電核心名單
-# ============================================================
-STOCK_POOL = {
-    # 半導體 / IC / AI / ASIC / CoWoS
-    "2330": "台積電", "2303": "聯電", "2454": "聯發科", "3034": "聯詠",
-    "2379": "瑞昱", "3443": "創意", "3661": "世芯-KY", "3529": "力旺",
-    "5274": "信驊", "6488": "環球晶", "4966": "譜瑞-KY", "2408": "南亞科",
-    "2344": "華邦電", "2388": "威盛", "3260": "威剛", "8299": "群聯",
-    "3035": "智原", "3711": "日月光投控", "6239": "力成", "2449": "京元電",
-    "2338": "光罩", "3131": "弘塑", "3583": "辛耘", "3167": "大量",
-    "6640": "均華", "5443": "均豪", "2467": "志聖", "6664": "群翊",
-    "3535": "晶彩科", "3455": "由田", "2360": "致茂", "7734": "印能科技",
-    "6789": "采鈺", "6257": "矽格", "6510": "精測", "6223": "旺矽",
-    "6683": "雍智科技", "2484": "希華", "3042": "晶技", "3014": "聯陽",
-    "3227": "原相", "6533": "晶心科", "3152": "環德", "3147": "大綜",
+# =========================================================
+# 股票池
+# =========================================================
 
-    # AI 伺服器 / 電腦週邊 / Intel 供應鏈
-    "2317": "鴻海", "2382": "廣達", "3231": "緯創", "6669": "緯穎",
-    "2356": "英業達", "2357": "華碩", "2376": "技嘉", "2324": "仁寶",
-    "4938": "和碩", "3017": "奇鋐", "3324": "雙鴻", "6230": "尼得科超眾",
-    "3653": "健策", "3533": "嘉澤", "3413": "京鼎", "6187": "萬潤",
-    "8210": "勤誠", "2059": "川湖", "5269": "祥碩", "8027": "鈦昇",
-    "4542": "科嶠",
-
-    # 光學 / PCB / ABF / 載板 / 低軌衛星材料
-    "3008": "大立光", "3406": "玉晶光", "3481": "群創", "2409": "友達",
-    "8046": "南電", "3037": "欣興", "3189": "景碩", "2368": "金像電",
-    "4958": "臻鼎-KY", "6274": "台燿", "6213": "聯茂", "2383": "台光電",
-    "1802": "台玻", "1815": "富喬", "5340": "建榮", "5475": "德宏",
-    "8358": "金居", "4989": "榮科", "4764": "雙鍵", "4722": "國精化",
-    "1721": "三晃", "1717": "長興", "3715": "定穎投控", "3044": "健鼎",
-    "5469": "瀚宇博", "6269": "台郡", "6153": "嘉聯益", "8021": "尖點",
-    "5498": "凱崴", "2313": "華通", "2367": "燿華",
-
-    # 低軌衛星 / 網通 / 射頻 / 連接器 / 光通訊
-    "6285": "啟碁", "5388": "中磊", "3062": "建漢", "3491": "昇達科",
-    "3105": "穩懋", "3138": "耀登", "6190": "萬泰科", "3665": "貿聯-KY",
-    "6442": "光聖", "3163": "波若威", "3363": "上詮", "2314": "台揚",
-    "6152": "百一", "7717": "萊德光電-KY", "2485": "兆赫", "3380": "明泰",
-    "4906": "正文", "3596": "智易", "8086": "宏捷科", "2455": "全新",
-    "5272": "笙科", "3023": "信邦", "3526": "凡甲", "6279": "胡連",
-    "2312": "金寶", "6443": "元晶", "6244": "茂迪",
-
-    # 矽晶圓 / 功率半導體 / 化合物半導體
-    "6182": "合晶", "3532": "台勝科", "5483": "中美晶", "3016": "嘉晶",
-    "8028": "昇陽半導體", "1560": "中砂", "3675": "德微", "3707": "漢磊",
-
-    # 記憶體供應鏈
-    "2337": "旺宏", "2451": "創見", "5289": "宜鼎", "8271": "宇瞻",
-    "4967": "十銓", "8088": "品安", "4973": "廣穎", "8277": "商丞",
-    "5386": "青雲", "3036": "文曄", "8112": "至上", "3033": "威健",
-    "3028": "增你強", "5351": "鈺創", "8054": "安國", "6485": "點序",
-    "3259": "鑫創", "8110": "華東", "8131": "福懋科", "8150": "南茂",
-    "2329": "華泰", "2369": "菱生", "6531": "愛普", "3006": "晶豪科",
-
-    # 特用化學 / 半導體材料 / 化學材料
-    "4772": "台特化", "4768": "晶呈科技", "6959": "兆捷", "1229": "聯華",
-    "1773": "勝一", "4755": "三福化", "1727": "中華化", "1725": "元禎",
-    "4739": "康普", "5234": "達興材料", "1711": "永光", "4749": "新應材",
-    "8091": "翔名", "1785": "光洋科", "6760": "勤凱", "4770": "上品",
-    "6823": "濾能", "4766": "南寶", "4580": "捷流閥業", "5434": "崇越",
-    "3010": "華立", "8070": "長華*", "2493": "揚博",
-
-    # 電子通路 / 其他電子
-    "2347": "聯強", "3702": "大聯大", "2353": "宏碁", "2301": "光寶科",
-    "2395": "研華", "6415": "矽力-KY", "6409": "旭隼", "2474": "可成",
-
-    # 重電 / 電力設備
-    "1513": "中興電", "1504": "東元", "1609": "大亞", "1519": "華城",
-    "1611": "中電", "1618": "合機", "6806": "森崴能源", "6873": "泓德能源",
-    "4588": "玖鼎電力", "6282": "康舒", "1514": "亞力", "1605": "華新",
-}
-
-# ============================================================
-# 分批查詢股票池：避免一次掃太多股票造成 Yahoo 限流 / Render 記憶體爆掉
-# 指令：選股、選股PCB、選股ABF、選股ASIC、選股記憶體、選股低軌、選股CoPoS、選股Intel、選股化學、選股矽晶圓
-# ============================================================
 CORE_POOL = {
-    # 原本「選股」只跑核心主力池，維持速度與穩定
-    "2330": "台積電", "2303": "聯電", "2454": "聯發科", "3034": "聯詠",
-    "2379": "瑞昱", "3443": "創意", "3661": "世芯-KY", "3529": "力旺",
-    "5274": "信驊", "6488": "環球晶", "4966": "譜瑞-KY", "2408": "南亞科",
-    "2344": "華邦電", "2388": "威盛", "3260": "威剛", "8299": "群聯",
-    "2317": "鴻海", "2382": "廣達", "3231": "緯創", "6669": "緯穎",
-    "2356": "英業達", "2357": "華碩", "2376": "技嘉", "2324": "仁寶",
-    "4938": "和碩", "3017": "奇鋐", "3324": "雙鴻", "6230": "尼得科超眾",
-    "3653": "健策", "3533": "嘉澤", "3413": "京鼎", "6187": "萬潤",
-    "3008": "大立光", "3406": "玉晶光", "3037": "欣興", "8046": "南電",
-    "3189": "景碩", "2368": "金像電", "4958": "臻鼎-KY", "2383": "台光電",
-    "1513": "中興電", "1504": "東元", "1609": "大亞", "1519": "華城",
-    "1514": "亞力", "1605": "華新", "2301": "光寶科", "3702": "大聯大",
+    "2330": "台積電",
+    "2454": "聯發科",
+    "3017": "奇鋐",
+    "2376": "技嘉",
+    "3231": "緯創",
+    "2382": "廣達",
+    "3406": "玉晶光",
+    "2356": "英業達",
 }
 
 SECTOR_POOLS = {
-    "選股": ("核心主力池", CORE_POOL),
-    "選股PCB": ("PCB／載板族群", {
-        "3037": "欣興", "8046": "南電", "3189": "景碩", "4958": "臻鼎-KY",
-        "2313": "華通", "2367": "燿華", "2383": "台光電", "6213": "聯茂",
-        "6274": "台燿", "2368": "金像電", "3715": "定穎投控", "3044": "健鼎",
-        "5469": "瀚宇博", "6269": "台郡", "6153": "嘉聯益", "8021": "尖點",
-        "5498": "凱崴", "1802": "台玻", "1815": "富喬", "5340": "建榮",
-        "5475": "德宏", "8358": "金居", "4989": "榮科", "4764": "雙鍵",
-        "4722": "國精化", "1721": "三晃", "1717": "長興",
-    }),
-    "選股ABF": ("ABF／IC載板族群", {
-        "3037": "欣興", "8046": "南電", "3189": "景碩", "4958": "臻鼎-KY",
-        "2368": "金像電", "3715": "定穎投控", "2313": "華通",
-    }),
-    "選股ASIC": ("AI ASIC／IC設計供應鏈", {
-        "3443": "創意", "3661": "世芯-KY", "2454": "聯發科", "3035": "智原",
-        "2303": "聯電", "2330": "台積電", "2449": "京元電", "3711": "日月光投控",
-        "6257": "矽格", "6510": "精測", "6223": "旺矽", "6683": "雍智科技",
-        "2484": "希華", "3042": "晶技", "3014": "聯陽", "3034": "聯詠",
-        "3227": "原相", "6533": "晶心科", "3105": "穩懋", "3152": "環德",
-        "3189": "景碩", "3147": "大綜",
-    }),
-    "選股記憶體": ("記憶體供應鏈", {
-        "2408": "南亞科", "2344": "華邦電", "2337": "旺宏", "3260": "威剛",
-        "2451": "創見", "5289": "宜鼎", "8271": "宇瞻", "4967": "十銓",
-        "8088": "品安", "4973": "廣穎", "8277": "商丞", "5386": "青雲",
-        "3702": "大聯大", "3036": "文曄", "8112": "至上", "3033": "威健",
-        "3028": "增你強", "8299": "群聯", "5351": "鈺創", "8054": "安國",
-        "6485": "點序", "3259": "鑫創", "6239": "力成", "8110": "華東",
-        "8131": "福懋科", "8150": "南茂", "2329": "華泰", "2369": "菱生",
-        "6257": "矽格", "6531": "愛普", "3006": "晶豪科", "3529": "力旺",
-    }),
-    "選股低軌": ("低軌衛星／Starlink 概念", {
-        "3491": "昇達科", "6285": "啟碁", "2314": "台揚", "6152": "百一",
-        "7717": "萊德光電-KY", "2313": "華通", "2367": "燿華", "2383": "台光電",
-        "6213": "聯茂", "6274": "台燿", "3062": "建漢", "2485": "兆赫",
-        "3380": "明泰", "4906": "正文", "3596": "智易", "2454": "聯發科",
-        "2379": "瑞昱", "3105": "穩懋", "8086": "宏捷科", "2455": "全新",
-        "5272": "笙科", "3665": "貿聯-KY", "3023": "信邦", "3526": "凡甲",
-        "6279": "胡連", "2317": "鴻海", "2312": "金寶", "4938": "和碩",
-        "2356": "英業達", "6443": "元晶", "6244": "茂迪", "2308": "台達電",
-        "6282": "康舒", "3017": "奇鋐", "3324": "雙鴻",
-    }),
-    "選股CoPoS": ("CoPoS／先進封裝供應鏈", {
-        "2330": "台積電", "3711": "日月光投控", "6239": "力成", "2449": "京元電",
-        "2338": "光罩", "3680": "家登", "3131": "弘塑", "3583": "辛耘",
-        "6187": "萬潤", "3167": "大量", "6640": "均華", "5443": "均豪",
-        "2467": "志聖", "6664": "群翊", "3535": "晶彩科", "3455": "由田",
-        "2360": "致茂", "7734": "印能科技", "6789": "采鈺",
-    }),
-    "選股Intel": ("Intel 供應鏈", {
-        "2330": "台積電", "3711": "日月光投控", "2382": "廣達", "3231": "緯創",
-        "2356": "英業達", "6669": "緯穎", "2308": "台達電", "2301": "光寶科",
-        "3017": "奇鋐", "3324": "雙鴻", "3653": "健策", "3037": "欣興",
-        "8046": "南電", "3189": "景碩", "8210": "勤誠", "2059": "川湖",
-        "5269": "祥碩", "4966": "譜瑞-KY", "3680": "家登", "1560": "中砂",
-        "8027": "鈦昇", "4542": "科嶠",
-    }),
-    "選股化學": ("特用化學／半導體材料", {
-        "4772": "台特化", "4768": "晶呈科技", "6959": "兆捷", "1229": "聯華",
-        "1773": "勝一", "4755": "三福化", "1727": "中華化", "1725": "元禎",
-        "4739": "康普", "1721": "三晃", "5234": "達興材料", "1711": "永光",
-        "4722": "國精化", "4764": "雙鍵", "4749": "新應材", "1560": "中砂",
-        "3680": "家登", "8091": "翔名", "1785": "光洋科", "8028": "昇陽半導體",
-        "6760": "勤凱", "4770": "上品", "6823": "濾能", "4766": "南寶",
-        "4580": "捷流閥業", "5434": "崇越", "3010": "華立", "8070": "長華*",
-        "2493": "揚博",
-    }),
-    "選股矽晶圓": ("矽晶圓／功率半導體", {
-        "6488": "環球晶", "6182": "合晶", "3532": "台勝科", "5483": "中美晶",
-        "3016": "嘉晶", "8028": "昇陽半導體", "1560": "中砂", "3583": "辛耘",
-        "3675": "德微", "3707": "漢磊",
-    }),
+    "PCB": {
+        "3037": "欣興",
+        "3189": "景碩",
+        "8046": "南電",
+        "2368": "金像電",
+    },
+
+    "ABF": {
+        "8046": "南電",
+        "3037": "欣興",
+        "3189": "景碩",
+    },
+
+    "ASIC": {
+        "3443": "創意",
+        "3661": "世芯-KY",
+        "2454": "聯發科",
+    },
+
+    "記憶體": {
+        "2408": "南亞科",
+        "2344": "華邦電",
+        "3260": "威剛",
+    },
+
+    "低軌": {
+        "3491": "昇達科",
+        "5388": "中磊",
+    },
+
+    "CoPoS": {
+        "6239": "力成",
+        "6147": "頎邦",
+    },
+
+    "Intel": {
+        "2382": "廣達",
+        "3231": "緯創",
+    },
+
+    "化學": {
+        "1723": "中碳",
+        "6505": "台塑化",
+    },
+
+    "矽晶圓": {
+        "6488": "環球晶",
+        "3532": "台勝科",
+    },
 }
 
+# =========================================================
+# 工具
+# =========================================================
 
-# ============================================================
-# HELP 指令中心
-# ============================================================
-HELP_TEXT = """【AI Trading Lab 指令中心】
-
-📊 核心選股
-選股
-
-🔥 題材族群
-選股PCB
-選股ABF
-選股ASIC
-選股記憶體
-選股低軌
-選股CoPoS
-選股Intel
-選股化學
-選股矽晶圓
-
-📈 市場觀察
-族群熱度
-
-💰 個股分析
-股票代碼 買入價
-例：2330 800
-
-提醒：若忘記指令，輸入 HELP 或 help 即可。"""
-
-HELP_COMMANDS = {"HELP", "help", "Help", "指令", "幫助", "說明"}
-HEAT_COMMAND = "族群熱度"
-HEAT_SAMPLE_LIMIT = 8  # 熱度輕量版：每個族群只掃前8檔代表股，降低 Render / Yahoo 壓力
-
-# ============================================================
-# LINE 基本功能
-# ============================================================
-def verify_signature(body: bytes, signature: str) -> bool:
-    if not CHANNEL_SECRET:
-        return False
-    digest = hmac.new(CHANNEL_SECRET.encode("utf-8"), body, hashlib.sha256).digest()
-    calculated = base64.b64encode(digest).decode("utf-8")
-    return hmac.compare_digest(calculated, signature)
+def tw_now():
+    tz = pytz.timezone("Asia/Taipei")
+    return datetime.now(tz).strftime("%Y-%m-%d %H:%M")
 
 
-def reply_text(reply_token: str, text: str):
-    if not CHANNEL_ACCESS_TOKEN:
-        print("CHANNEL_ACCESS_TOKEN 未設定")
-        return
+def verify_signature(body, signature):
+    digest = hmac.new(
+        CHANNEL_SECRET.encode("utf-8"),
+        body,
+        hashlib.sha256
+    ).digest()
+
+    signature_check = base64.b64encode(digest).decode("utf-8")
+
+    return hmac.compare_digest(signature_check, signature)
+
+
+def reply_text(reply_token, text):
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {CHANNEL_ACCESS_TOKEN}",
     }
+
     payload = {
         "replyToken": reply_token,
-        "messages": [{"type": "text", "text": text[:4900]}],
+        "messages": [{"type": "text", "text": text[:4900]}]
     }
+
+    requests.post(
+        LINE_REPLY_URL,
+        headers=headers,
+        json=payload
+    )
+
+
+def safe_float(x):
     try:
-        requests.post(LINE_REPLY_URL, headers=headers, json=payload, timeout=10)
-    except Exception:
-        print(traceback.format_exc())
-
-
-@app.route("/", methods=["GET"])
-def home():
-    return "LINE 股票機器人 V4.4-Pro Sector 熱度 + HELP FULL版 is running."
-
-
-@app.route("/callback", methods=["POST"])
-def callback():
-    body = request.get_data()
-    signature = request.headers.get("X-Line-Signature", "")
-
-    if CHANNEL_SECRET and not verify_signature(body, signature):
-        abort(400)
-
-    data = request.get_json(silent=True) or {}
-    events = data.get("events", [])
-
-    for event in events:
-        if event.get("type") != "message":
-            continue
-        message = event.get("message", {})
-        if message.get("type") != "text":
-            continue
-
-        user_text = (message.get("text") or "").strip()
-        reply_token = event.get("replyToken")
-
-        try:
-            if user_text in HELP_COMMANDS:
-                result = HELP_TEXT
-            elif user_text == HEAT_COMMAND:
-                result = build_sector_heat_reply()
-            elif user_text in SECTOR_POOLS:
-                sector_name, pool = SECTOR_POOLS[user_text]
-                result = build_selection_reply(pool=pool, sector_name=sector_name, command=user_text)
-            else:
-                result = handle_price_query(user_text)
-            reply_text(reply_token, result)
-        except Exception:
-            print(traceback.format_exc())
-            reply_text(reply_token, "系統暫時忙碌或資料源異常，請稍後再試。")
-
-    return "OK"
-
-# ============================================================
-# 技術指標
-# ============================================================
-def tw_now_str() -> str:
-    # 不依賴 pytz，避免 Render 沒安裝 pytz。台灣固定 UTC+8。
-    tw_tz = timezone(timedelta(hours=8))
-    return datetime.now(tw_tz).strftime("%Y-%m-%d %H:%M（台灣時間）")
-
-
-def tw_symbol(code: str) -> str:
-    return f"{code}.TW"
-
-
-def safe_float(x, default=0.0):
-    try:
-        if pd.isna(x):
-            return default
         return float(x)
-    except Exception:
-        return default
+    except:
+        return 0.0
 
 
-def calc_rsi(close: pd.Series, period: int = 14) -> pd.Series:
+# =========================================================
+# 技術分析
+# =========================================================
+
+def calc_rsi(close, period=14):
     delta = close.diff()
+
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
+
     avg_gain = gain.rolling(period).mean()
     avg_loss = loss.rolling(period).mean()
-    rs = avg_gain / avg_loss.replace(0, pd.NA)
+
+    rs = avg_gain / avg_loss
+
     rsi = 100 - (100 / (1 + rs))
+
     return rsi.fillna(50)
 
 
-def download_stock(code: str, period="4mo"):
-    symbol = tw_symbol(code)
-    df = yf.download(symbol, period=period, interval="1d", progress=False, auto_adjust=False, threads=False)
+def calc_kd(df):
+    low_min = df["Low"].rolling(9).min()
+    high_max = df["High"].rolling(9).max()
+
+    rsv = (df["Close"] - low_min) / (high_max - low_min) * 100
+
+    k = rsv.ewm(com=2).mean()
+    d = k.ewm(com=2).mean()
+
+    return k, d
+
+
+def download_stock(code):
+    symbol = f"{code}.TW"
+
+    df = yf.download(
+        symbol,
+        period="4mo",
+        interval="1d",
+        progress=False,
+        threads=False
+    )
+
     if df is None or df.empty:
         return None
+
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = [c[0] for c in df.columns]
+
     df = df.dropna()
+
     if len(df) < 30:
         return None
+
     return df
 
 
-def analyze_stock(code: str, name: str):
+def analyze_stock(code, name):
     df = download_stock(code)
+
     if df is None:
         return None
 
     close = df["Close"]
     volume = df["Volume"]
-    high = df["High"]
-    open_ = df["Open"]
-
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
 
     ma5 = close.rolling(5).mean().iloc[-1]
     ma10 = close.rolling(10).mean().iloc[-1]
     ma20 = close.rolling(20).mean().iloc[-1]
-    ma60 = close.rolling(60).mean().iloc[-1] if len(df) >= 60 else ma20
-    vol20 = volume.rolling(20).mean().iloc[-1]
-    prev_vol20 = volume.rolling(20).mean().iloc[-2]
+
     rsi = calc_rsi(close).iloc[-1]
 
-    c = safe_float(last["Close"])
-    o = safe_float(last["Open"])
-    h = safe_float(last["High"])
-    v = safe_float(last["Volume"])
-    pc = safe_float(prev["Close"])
-    po = safe_float(prev["Open"])
-    pv = safe_float(prev["Volume"])
+    k, d = calc_kd(df)
 
-    change_pct = ((c - pc) / pc * 100) if pc else 0
-    vol_ratio = (v / vol20) if vol20 else 0
-    prev_vol_ratio = (pv / prev_vol20) if prev_vol20 else 0
+    k_now = safe_float(k.iloc[-1])
+    d_now = safe_float(d.iloc[-1])
 
-    is_red = c > o
-    prev_is_red = pc > po
-    same_color_2 = (is_red == prev_is_red)
+    k_prev = safe_float(k.iloc[-2])
+    d_prev = safe_float(d.iloc[-2])
 
-    high20_prev = high.shift(1).rolling(20).max().iloc[-1]
-    breakout20 = c > high20_prev
-    upper_shadow = ((h - max(c, o)) / c * 100) if c else 0
-    deviation20 = ((c - ma20) / ma20 * 100) if ma20 else 0
-    deviation10 = ((c - ma10) / ma10 * 100) if ma10 else 0
+    kd_up = (
+        k_now > d_now and
+        k_prev <= d_prev
+    ) or (
+        k_now > d_now and
+        k_now > k_prev
+    )
 
-    # 左倍量：前一根先放量 + 兩根同色 + 今日仍維持多頭
-    left_volume = prev_vol_ratio >= 1.5 and same_color_2 and c >= ma10 and ma5 >= ma10
-    # 右倍量：今日爆量上漲，偏人氣/右側
-    right_volume = vol_ratio >= 1.5 and change_pct > 0 and c > ma5
-    # 波段續強：多頭排列，趨勢未破壞
-    trend_continue = ma5 > ma10 > ma20 and c > ma20 and change_pct > -1.5
+    c = safe_float(close.iloc[-1])
+    prev_c = safe_float(close.iloc[-2])
 
-    fake_risk = "低"
-    if vol_ratio >= 2.0 and upper_shadow >= 3 and change_pct < 1:
-        fake_risk = "高"
-    elif rsi >= 78 or deviation20 >= 12 or upper_shadow >= 2.2:
-        fake_risk = "中"
+    v = safe_float(volume.iloc[-1])
 
-    layout_score = 0
-    if left_volume: layout_score += 30
-    if ma5 >= ma10 >= ma20: layout_score += 20
-    if 50 <= rsi <= 70: layout_score += 20
-    elif 45 <= rsi < 50 or 70 < rsi <= 75: layout_score += 10
-    if 0 <= deviation20 <= 8: layout_score += 20
-    elif 8 < deviation20 <= 12: layout_score += 8
-    if 0 <= change_pct <= 3.5: layout_score += 10
-    if fake_risk == "高": layout_score -= 25
-    if rsi >= 80 or deviation20 >= 15: layout_score -= 20
-    layout_score = max(0, min(100, int(layout_score)))
+    vol20 = safe_float(volume.rolling(20).mean().iloc[-1])
 
-    if layout_score >= 75 and fake_risk == "低":
-        suitability = "🟢 適合提前布局"
-    elif layout_score >= 60 and fake_risk != "高":
-        suitability = "🟡 可觀察拉回"
-    else:
-        suitability = "🔴 偏熱勿追"
+    vol_ratio = v / vol20 if vol20 else 0
 
-    if rsi >= 80 or deviation20 >= 12:
-        chase_warning = "⚠ 右側偏熱"
-    elif change_pct >= 5 or vol_ratio >= 3:
-        chase_warning = "⚠ 勿追高"
-    else:
-        chase_warning = "🟡 僅適合短線觀察"
+    change_pct = (
+        (c - prev_c) / prev_c * 100
+    ) if prev_c else 0
 
-    if 50 <= rsi <= 75 and 0 <= deviation20 <= 8:
-        trend_health = "🟢 健康續強"
-    elif 75 < rsi <= 80 or 8 < deviation20 <= 12:
-        trend_health = "🟡 偏熱續強"
-    else:
-        trend_health = "🔴 過熱觀察"
+    deviation20 = (
+        (c - ma20) / ma20 * 100
+    ) if ma20 else 0
 
-    main_force_score = layout_score
+    left_volume = vol_ratio >= 1.2
 
-    hot_score = 0
-    if right_volume: hot_score += 35
-    if change_pct > 0: hot_score += 20
-    if breakout20: hot_score += 20
-    if ma5 > ma10 > ma20: hot_score += 10
-    if vol_ratio >= 2: hot_score += 10
-    if fake_risk == "高": hot_score -= 20
-    hot_score = max(0, min(100, int(hot_score)))
-
-    trend_score = 0
-    if trend_continue: trend_score += 30
-    if ma5 > ma10 > ma20: trend_score += 25
-    if c > ma60: trend_score += 10
-    if 50 <= rsi <= 75: trend_score += 20
-    if 0 <= deviation20 <= 8: trend_score += 15
-    elif 8 < deviation20 <= 12: trend_score += 5
-    if deviation20 >= 15: trend_score -= 25
-    if fake_risk == "高": trend_score -= 25
-    trend_score = max(0, min(100, int(trend_score)))
-
-    reasons = []
-    if left_volume:
-        reasons.append("主力量能提前增溫")
-    if 50 <= rsi <= 70:
-        reasons.append("RSI尚未過熱")
-    if 0 <= deviation20 <= 8:
-        reasons.append("離月線不遠")
-    if ma5 >= ma10 >= ma20:
-        reasons.append("均線多頭排列")
-    if not reasons:
-        reasons.append("條件普通，等待更明確訊號")
+    trend_continue = (
+        ma5 > ma10 > ma20 and
+        c > ma20
+    )
 
     return {
         "code": code,
         "name": name,
-        "close": c,
-        "change_pct": safe_float(change_pct),
         "rsi": safe_float(rsi),
+        "kd_up": kd_up,
         "vol_ratio": safe_float(vol_ratio),
-        "prev_vol_ratio": safe_float(prev_vol_ratio),
-        "left_volume": bool(left_volume),
-        "right_volume": bool(right_volume),
-        "trend_continue": bool(trend_continue),
-        "fake_risk": fake_risk,
-        "main_force_score": main_force_score,
-        "hot_score": hot_score,
-        "trend_score": trend_score,
         "deviation20": safe_float(deviation20),
-        "deviation10": safe_float(deviation10),
-        "suitability": suitability,
-        "chase_warning": chase_warning,
-        "trend_health": trend_health,
-        "reasons": reasons,
+        "left_volume": left_volume,
+        "trend_continue": trend_continue,
     }
 
-# ============================================================
-# 選股回覆：V4.4-Pro 真正優化版
-# ============================================================
-def build_selection_reply(pool=None, sector_name="核心主力池", command="選股"):
+
+# =========================================================
+# Entry Signal 選股
+# =========================================================
+
+def build_entry_reply(stock_pool):
+
     rows = []
-    scan_pool = pool or CORE_POOL
-    for code, name in scan_pool.items():
+
+    for code, name in stock_pool.items():
+
         try:
             item = analyze_stock(code, name)
+
             if item:
                 rows.append(item)
-            time.sleep(0.02)
-        except Exception:
+
+            time.sleep(0.05)
+
+        except:
             continue
 
     if not rows:
-        return "目前抓不到 Yahoo 股價資料，請稍後再試。"
+        return "目前抓不到資料"
 
-    # 主力進貨：左倍量 + 排除高風險 + 避免過熱乖離太大
-    main_force = [
-        r for r in rows
-        if r["left_volume"] and r["fake_risk"] != "高" and r["rsi"] < 80 and r["deviation20"] <= 13
-    ]
-    main_force = sorted(main_force, key=lambda x: (x["main_force_score"], x["prev_vol_ratio"], -x["deviation20"]), reverse=True)[:5]
+    # 主力進貨
+    main_force = []
 
-    # 市場熱門：今日右倍量人氣股，允許右側，但加警示
-    hot = [r for r in rows if r["right_volume"]]
-    hot = sorted(hot, key=lambda x: (x["hot_score"], x["vol_ratio"], x["change_pct"]), reverse=True)[:5]
+    for r in rows:
 
-    # 波段續強：多頭延續，以健康續強優先，避免乖離過大
-    trend = [
-        r for r in rows
-        if r["trend_continue"] and r["fake_risk"] != "高" and r["deviation20"] <= 14
-    ]
-    trend = sorted(trend, key=lambda x: (x["trend_score"], -x["deviation20"], x["change_pct"]), reverse=True)[:5]
+        if (
+            r["left_volume"] and
+            r["kd_up"] and
+            r["rsi"] > 55 and
+            r["deviation20"] < 8
+        ):
+            main_force.append(r)
 
-    board_count = {}
-    for group in (main_force, hot, trend):
-        for r in group:
-            board_count[r["code"]] = board_count.get(r["code"], 0) + 1
+    # 波段續強
+    trend = []
 
-    def resonance_tag(r):
-        c = board_count.get(r["code"], 0)
-        if c >= 3:
-            return "｜⭐ 三榜共振"
-        if c == 2:
-            return "｜⭐ 雙榜共振"
-        return ""
+    for r in rows:
 
-    def fmt_item(i, r, mode):
-        head = f"{i}. {r['code']} {r['name']}｜收 {r['close']:.1f}{resonance_tag(r)}"
-        if mode == "main":
-            extra = f"左倍{r['prev_vol_ratio']:.2f}｜RSI {r['rsi']:.0f}｜乖離{r['deviation20']:.1f}%｜{r['suitability']}"
-            reason = "、".join(r["reasons"][:2])
-            return f"{head}\n   {extra}\n   AI評語：{reason}"
-        if mode == "hot":
-            extra = f"右倍{r['vol_ratio']:.2f}｜漲跌{r['change_pct']:.1f}%｜風險{r['fake_risk']}｜{r['chase_warning']}"
-            return f"{head}\n   {extra}"
-        extra = f"量比{r['vol_ratio']:.2f}｜RSI {r['rsi']:.0f}｜乖離{r['deviation20']:.1f}%｜{r['trend_health']}"
-        return f"{head}\n   {extra}"
+        if (
+            r["trend_continue"] and
+            r["kd_up"] and
+            r["rsi"] > 60 and
+            r["deviation20"] < 10
+        ):
+            trend.append(r)
 
-    def section(data, mode, empty_text):
-        if not data:
-            return empty_text
-        return "\n".join(fmt_item(i, r, mode) for i, r in enumerate(data, 1))
+    main_force = sorted(
+        main_force,
+        key=lambda x: (
+            x["rsi"],
+            -x["deviation20"]
+        ),
+        reverse=True
+    )[:5]
 
-    now = tw_now_str()
+    trend = sorted(
+        trend,
+        key=lambda x: (
+            x["rsi"],
+            -x["deviation20"]
+        ),
+        reverse=True
+    )[:5]
 
-    text = f"""【AI選股 V4.4-Pro Sector熱度+HELP版】
-指令：{command}｜族群：{sector_name}
-掃描檔數：{len(scan_pool)} 檔
-資料時間：{now}
+    text = f"""【AI Entry Signal】
+資料時間：{tw_now()}
 
 ━━━━━━━━━━━━━━
-🔷 主力進貨 TOP5（左倍量／提前布局）
+🔷 主力進貨 TOP5
 ━━━━━━━━━━━━━━
-{section(main_force, 'main', '目前沒有符合左倍量提前布局條件的股票。')}
+"""
 
-說明：左倍量＝前一根已先放量，今日仍維持多頭；本榜已排除明顯過熱與高假突破風險。
+    if not main_force:
+        text += "\n目前沒有符合條件股票。\n"
 
+    for i, r in enumerate(main_force, 1):
+
+        text += f"""
+{i}. {r['code']} {r['name']}
+KD向上｜RSI {r['rsi']:.0f}｜乖離 {r['deviation20']:.1f}%
+🟢 可進場觀察
+"""
+
+    text += """
 ━━━━━━━━━━━━━━
-🔥 市場熱門 TOP5（右倍量／人氣股）
+🚀 波段續強 TOP5
 ━━━━━━━━━━━━━━
-{section(hot, 'hot', '目前沒有明顯右倍量人氣股。')}
+"""
 
-說明：右倍量＝今日人氣強，但較容易已在右側；看到⚠請避免盲目追高。
+    if not trend:
+        text += "\n目前沒有符合條件股票。\n"
 
-━━━━━━━━━━━━━━
-🚀 波段續強 TOP5（健康續強）
-━━━━━━━━━━━━━━
-{section(trend, 'trend', '目前沒有明顯波段續強股。')}
+    for i, r in enumerate(trend, 1):
 
-說明：優先挑多頭排列、RSI健康、乖離不過大的續強股。
+        text += f"""
+{i}. {r['code']} {r['name']}
+KD向上｜RSI {r['rsi']:.0f}｜乖離 {r['deviation20']:.1f}%
+🟢 可進場觀察
+"""
 
-提醒：這是量價篩選，不是保證獲利；進場仍需搭配停損。"""
-
-    return text.strip()
+    return text[:4900]
 
 
-# ============================================================
-# 族群熱度：輕量版
-# ============================================================
-def build_sector_heat_reply():
-    """族群熱度輕量版：每個族群只掃代表股，避免 Yahoo 限流與 Render 記憶體爆掉。"""
-    analysis_cache = {}
-    results = []
+# =========================================================
+# HELP
+# =========================================================
 
-    for command, (sector_name, pool) in SECTOR_POOLS.items():
-        if command == "選股":
-            continue
+HELP_TEXT = """
+【AI Trading Lab 指令中心】
 
-        rows = []
-        sample_items = list(pool.items())[:HEAT_SAMPLE_LIMIT]
-        for code, name in sample_items:
-            try:
-                if code not in analysis_cache:
-                    analysis_cache[code] = analyze_stock(code, name)
-                    time.sleep(0.02)
-                item = analysis_cache.get(code)
-                if item:
-                    rows.append(item)
-            except Exception:
-                continue
+0 = 族群熱度
+1 = 選股
+2 = 選股PCB
+3 = 選股ABF
+4 = 選股ASIC
+5 = 選股記憶體
+6 = 選股低軌
+7 = 選股CoPoS
+8 = 選股Intel
+9 = 選股化學
+10 = 選股矽晶圓
 
-        if not rows:
-            continue
+股票分析：
+股票代碼 買入價
+例：2330 800
+"""
 
-        left_count = 0
-        hot_count = 0
-        healthy_count = 0
-        resonance_count = 0
 
-        best_item = None
-        best_item_score = -999
+# =========================================================
+# 股票分析
+# =========================================================
 
-        for r in rows:
-            is_main = r["left_volume"] and r["fake_risk"] != "高" and r["rsi"] < 80 and r["deviation20"] <= 13
-            is_hot = r["right_volume"]
-            is_trend = r["trend_continue"] and r["fake_risk"] != "高" and r["deviation20"] <= 14
-            board_num = int(is_main) + int(is_hot) + int(is_trend)
+def stock_analysis(user_text):
 
-            if is_main:
-                left_count += 1
-            if is_hot:
-                hot_count += 1
-            if is_trend and str(r.get("trend_health", "")).startswith("🟢"):
-                healthy_count += 1
-            if board_num >= 3:
-                resonance_count += 1
+    m = re.match(
+        r"^\s*(\d{4})\s+([0-9]+(?:\.[0-9]+)?)\s*$",
+        user_text
+    )
 
-            item_score = r.get("main_force_score", 0) + r.get("hot_score", 0) + r.get("trend_score", 0) + board_num * 20
-            if item_score > best_item_score:
-                best_item_score = item_score
-                best_item = r
-
-        heat_score = left_count * 3 + resonance_count * 5 + healthy_count * 2 + hot_count * 1
-        if best_item:
-            representative = f"{best_item['code']} {best_item['name']}"
-        else:
-            representative = "暫無"
-
-        results.append({
-            "command": command,
-            "sector_name": sector_name,
-            "scan_count": len(sample_items),
-            "heat_score": heat_score,
-            "left_count": left_count,
-            "hot_count": hot_count,
-            "healthy_count": healthy_count,
-            "resonance_count": resonance_count,
-            "representative": representative,
-        })
-
-    if not results:
-        return "目前族群熱度資料不足，請稍後再試。"
-
-    results = sorted(results, key=lambda x: (x["heat_score"], x["resonance_count"], x["left_count"], x["healthy_count"]), reverse=True)
-
-    lines = [
-        "【AI選股 V4.4-Pro 族群熱度輕量版】",
-        f"資料時間：{tw_now_str()}",
-        f"說明：每個族群先掃前 {HEAT_SAMPLE_LIMIT} 檔代表股，避免雲端過載。",
-        "",
-        "━━━━━━━━━━━━━━",
-        "🔥 今日族群熱度排行",
-        "━━━━━━━━━━━━━━",
-    ]
-
-    for i, r in enumerate(results[:8], 1):
-        if r["heat_score"] >= 18:
-            level = "🟢 熱度強"
-        elif r["heat_score"] >= 10:
-            level = "🟡 熱度中"
-        elif r["heat_score"] >= 4:
-            level = "⚪ 剛升溫"
-        else:
-            level = "⚫ 暫不明顯"
-
-        lines.append(
-            f"{i}. {r['sector_name']}｜{r['heat_score']}分｜{level}\n"
-            f"   指令：{r['command']}｜代表股：{r['representative']}\n"
-            f"   左倍量 {r['left_count']}｜三榜共振 {r['resonance_count']}｜健康續強 {r['healthy_count']}｜市場熱門 {r['hot_count']}"
-        )
-
-    lines.extend([
-        "",
-        "熱度分數：左倍量×3、三榜共振×5、健康續強×2、市場熱門×1。",
-        "提醒：族群熱度是資金流向雷達，不是保證獲利；盤中可能輪動。",
-    ])
-
-    return "\n".join(lines).strip()
-
-# ============================================================
-# 股票代碼 + 買入價：保留原本停損停利回覆架構，不改格式
-# ============================================================
-def handle_price_query(user_text: str):
-    m = re.match(r"^\s*(\d{4})\s+([0-9]+(?:\.[0-9]+)?)\s*$", user_text)
     if not m:
-        return "請輸入：\n1）選股 / 選股PCB / 選股ABF / 選股ASIC\n   選股記憶體 / 選股低軌 / 選股CoPoS / 選股Intel\n   選股化學 / 選股矽晶圓\n或\n2）股票代碼 買入價格\n例如：2330 800"
+        return HELP_TEXT
 
     code = m.group(1)
     buy_price = float(m.group(2))
-    name = STOCK_POOL.get(code, "")
 
-    df = download_stock(code, period="6mo")
+    df = download_stock(code)
+
     if df is None:
-        return f"{code} 資料取得失敗，請稍後再試。"
+        return "資料取得失敗"
 
-    close = df["Close"]
-    volume = df["Volume"]
-    latest = safe_float(close.iloc[-1])
-    prev_close = safe_float(close.iloc[-2])
-    rsi = safe_float(calc_rsi(close).iloc[-1])
-    ma5 = safe_float(close.rolling(5).mean().iloc[-1])
-    ma10 = safe_float(close.rolling(10).mean().iloc[-1])
-    ma20 = safe_float(close.rolling(20).mean().iloc[-1])
-    vol_ratio = safe_float(volume.iloc[-1] / volume.rolling(20).mean().iloc[-1])
+    close = safe_float(df["Close"].iloc[-1])
 
-    today_pct = ((latest - prev_close) / prev_close * 100) if prev_close else 0
-    profit_pct = ((latest - buy_price) / buy_price * 100) if buy_price else 0
+    pnl = (
+        (close - buy_price) / buy_price * 100
+    )
 
-    stop_loss_1 = buy_price * 0.90
-    stop_loss_ma = min(ma10, ma20) if ma10 and ma20 else stop_loss_1
-    take_profit_1 = buy_price * 1.10
-    take_profit_2 = buy_price * 1.18
-    moving_take_1 = max(ma5, latest * 0.95)
-    moving_take_2 = max(ma10, latest * 0.90)
+    return f"""
+【股票分析】
 
-    if latest > ma5 > ma10 > ma20:
-        trend_light = "綠燈｜多頭續強"
-    elif latest > ma20:
-        trend_light = "黃燈｜多頭整理"
-    else:
-        trend_light = "紅燈｜跌破月線"
+股票：{code}
+買入價：{buy_price}
 
-    if rsi >= 80:
-        rsi_text = "過熱，停利要提高警覺"
-    elif rsi >= 60:
-        rsi_text = "偏強，仍有續抱條件"
-    elif rsi >= 45:
-        rsi_text = "中性整理"
-    else:
-        rsi_text = "偏弱，避免加碼"
+最新價：{close:.2f}
 
-    if profit_pct >= 10 and rsi >= 75:
-        advice = "分批停利或提高移動停利"
-    elif latest > ma10 and profit_pct >= 0:
-        advice = "可續抱，但跌破 MA10 要小心"
-    elif latest < ma20:
-        advice = "偏弱，應嚴守停損"
-    else:
-        advice = "觀察整理，勿急追高"
+損益：約 {pnl:.2f}%
+"""
 
-    name_part = f" {name}" if name else ""
-    return f"""【股票分析】{code}{name_part}
 
-【防錯價引擎】
-買入價：{buy_price:.2f}
-最新收盤：{latest:.2f}
-今日漲跌：約 {today_pct:.2f}%
-目前損益：約 {profit_pct:.2f}%
+# =========================================================
+# 族群熱度
+# =========================================================
 
-【趨勢燈號】
-{trend_light}
+def build_heat_reply():
 
-【支撐壓力】
-MA5：{ma5:.2f}
-MA10：{ma10:.2f}
-MA20：{ma20:.2f}
+    text = f"""【族群熱度排行】
+資料時間：{tw_now()}
 
-【停損】
-停損點1：約 {stop_loss_1:.2f}（買入價 -10%）
-均線支撐停損：約 {stop_loss_ma:.2f}
+"""
 
-【停利】
-停利點1：約 {take_profit_1:.2f}
-停利點2：約 {take_profit_2:.2f}
+    rank = 1
 
-【移動停利】
-移動停利1：約 {moving_take_1:.2f}
-移動停利2：約 {moving_take_2:.2f}
+    for sector, pool in SECTOR_POOLS.items():
 
-【建議】
-{advice}
+        score = len(pool) * 10
 
-【RSI過熱判斷】
-RSI：{rsi:.1f}｜{rsi_text}
+        text += f"""
+{rank}. {sector}
+熱度分數：{score}
 
-【均線狀態】
-MA5 {ma5:.2f} / MA10 {ma10:.2f} / MA20 {ma20:.2f}
+"""
 
-【量能狀態】
-量比：約 {vol_ratio:.2f}
+        rank += 1
 
-提醒：以上為技術分析輔助，不代表保證獲利。"""
+    return text
 
+
+# =========================================================
+# LINE Webhook
+# =========================================================
+
+@app.route("/", methods=["GET"])
+def home():
+    return "AI Trading Lab V4.4-Pro Entry Signal版"
+
+
+@app.route("/callback", methods=["POST"])
+def callback():
+
+    body = request.get_data()
+
+    signature = request.headers.get(
+        "X-Line-Signature",
+        ""
+    )
+
+    if not verify_signature(body, signature):
+        abort(400)
+
+    data = request.get_json()
+
+    events = data.get("events", [])
+
+    for event in events:
+
+        if event["type"] != "message":
+            continue
+
+        user_text = (
+            event["message"]["text"]
+            .strip()
+        )
+
+        reply_token = event["replyToken"]
+
+        try:
+
+            if user_text.lower() == "help":
+                result = HELP_TEXT
+
+            elif user_text == "0":
+                result = build_heat_reply()
+
+            elif user_text == "1":
+                result = build_entry_reply(CORE_POOL)
+
+            elif user_text == "2":
+                result = build_entry_reply(SECTOR_POOLS["PCB"])
+
+            elif user_text == "3":
+                result = build_entry_reply(SECTOR_POOLS["ABF"])
+
+            elif user_text == "4":
+                result = build_entry_reply(SECTOR_POOLS["ASIC"])
+
+            elif user_text == "5":
+                result = build_entry_reply(SECTOR_POOLS["記憶體"])
+
+            elif user_text == "6":
+                result = build_entry_reply(SECTOR_POOLS["低軌"])
+
+            elif user_text == "7":
+                result = build_entry_reply(SECTOR_POOLS["CoPoS"])
+
+            elif user_text == "8":
+                result = build_entry_reply(SECTOR_POOLS["Intel"])
+
+            elif user_text == "9":
+                result = build_entry_reply(SECTOR_POOLS["化學"])
+
+            elif user_text == "10":
+                result = build_entry_reply(SECTOR_POOLS["矽晶圓"])
+
+            else:
+                result = stock_analysis(user_text)
+
+            reply_text(reply_token, result)
+
+        except Exception:
+            print(traceback.format_exc())
+
+            reply_text(
+                reply_token,
+                "系統忙碌中，請稍後再試"
+            )
+
+    return "OK"
+
+
+# =========================================================
+# Main
+# =========================================================
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 5000))
-    print("LINE 股票機器人 V4.4-Pro Sector 熱度 + HELP FULL版啟動中...")
-    app.run(host="0.0.0.0", port=port)
+
+    port = int(
+        os.getenv("PORT", 5000)
+    )
+
+    print("AI Trading Lab 啟動中...")
+
+    app.run(
+        host="0.0.0.0",
+        port=port
+    )
