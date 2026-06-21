@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-LINE 股票機器人 V4.5.4 SmartMoney Pro FundStrength Final 正式版
+LINE 股票機器人 V4.5.5 SmartMoney Pro Final 正式版
 用途：部署在 Render，LINE 輸入 0~10 指令回傳族群熱度與選股結果。
 
 Render Start Command：gunicorn line_stock_bot:app
@@ -207,7 +207,7 @@ def reply_text(reply_token: str, text: str):
 
 @app.route("/", methods=["GET"])
 def home():
-    return "LINE 股票機器人 V4.5.4 SmartMoney Pro FundStrength Final is running."
+    return "LINE 股票機器人 V4.5.5 SmartMoney Pro Final is running."
 
 
 @app.route("/callback", methods=["POST"])
@@ -694,25 +694,28 @@ def calc_fund_signal(row: dict, news_score: int = 0):
 
     score = max(0.0, min(10.0, score))
 
-    if score >= 7.5 and risk != "高" and today_pct > 0:
+    # V4.5.5：資金強度重新分級，避免 2~4 分全部顯示成紅燈。
+    if score >= 8.0 and risk != "高" and today_pct > 0:
         label = "🟢強力流入"
-    elif score >= 5.5 and risk != "高":
+    elif score >= 6.0 and risk != "高":
         label = "🟢資金流入"
-    elif score >= 3.2:
+    elif score >= 4.0:
         label = "🟡資金觀察"
+    elif score >= 2.0:
+        label = "🟠資金偏弱"
     elif score <= 1.8 or (today_pct < 0 and vol_ratio >= 1.2):
         label = "🔴資金轉弱"
     else:
-        label = "🟡資金觀察"
+        label = "🟠資金偏弱"
 
-    if score >= 8.5:
+    if score >= 8.0:
         strength = "極強"
-    elif score >= 6.5:
+    elif score >= 6.0:
         strength = "偏強"
     elif score >= 4.0:
-        strength = "中性偏強"
+        strength = "中性觀察"
     elif score >= 2.0:
-        strength = "觀察偏弱"
+        strength = "偏弱"
     else:
         strength = "轉弱"
 
@@ -735,14 +738,17 @@ def make_group_fund_signal(rows, news_score: int = 0):
     very_strong = sum(1 for s in signals if "強力" in s["label"])
     weak = sum(1 for s in signals if "轉弱" in s["label"])
 
-    if avg_score >= 5.8 and strong >= max(2, len(rows) * 0.35):
+    # V4.5.5：族群資金燈號放寬紅燈條件，新增偏弱層級。
+    if avg_score >= 6.2 and strong >= max(2, len(rows) * 0.35):
         label = "🟢族群資金流入"
-    elif avg_score >= 4.2 or strong > weak:
+    elif avg_score >= 4.0 or strong > weak:
         label = "🟡族群資金觀察"
+    elif avg_score >= 2.0:
+        label = "🟠族群資金偏弱"
     elif weak >= max(2, len(rows) * 0.35):
         label = "🔴族群資金轉弱"
     else:
-        label = "🟡族群資金觀察"
+        label = "🟠族群資金偏弱"
     if very_strong >= 2 and weak == 0:
         label = "🟢族群資金強勢"
     return {"label": label, "avg_score": avg_score, "strong": strong, "weak": weak}
@@ -751,6 +757,47 @@ def make_group_fund_signal(rows, news_score: int = 0):
 # 回傳格式
 # ============================================================
 
+def display_smart_score(row: dict):
+    """V4.5.5 主力分數校正：10 分不再輕易出現，8 分以上就視為強。"""
+    raw = int(row.get("smart_score", 0) or 0)
+    risk = row.get("risk", "中")
+    score = raw
+    if raw >= 10:
+        score = 9
+    elif raw >= 9 and not row.get("left_volume", False):
+        score = 8
+    if risk == "高":
+        score = min(score, 6)
+    elif risk == "中":
+        score = min(score, 8)
+    return max(0, min(10, int(score)))
+
+
+def calc_composite_rating(row: dict, news_score: int = 0):
+    """V4.5.5 綜合評級：主力分數 + 資金強度 + 新聞燈號。"""
+    main = display_smart_score(row)
+    fund = calc_fund_signal(row, news_score)
+    fund_score = float(fund.get("score", 0) or 0)
+    risk = row.get("risk", "中")
+    news_adj = 0.8 if news_score > 0 else (-1.0 if news_score < 0 else 0.0)
+    total = main * 0.55 + fund_score * 0.35 + news_adj
+    if risk == "高":
+        total -= 1.2
+    elif risk == "中":
+        total -= 0.3
+
+    if total >= 7.2 and risk != "高":
+        label = "🟢A級"
+        advice = "可優先觀察"
+    elif total >= 5.0 and risk != "高":
+        label = "🟡B級"
+        advice = "等拉回確認"
+    else:
+        label = "🔴C級"
+        advice = "暫不追價"
+    return {"label": label, "score": max(0.0, min(10.0, total)), "advice": advice}
+
+
 def risk_rank_value(r: dict):
     risk = r.get("risk", "中")
     return {"低": 0, "中": 1, "高": 2}.get(risk, 1)
@@ -758,11 +805,14 @@ def risk_rank_value(r: dict):
 
 def fmt_stock_line(idx: int, r: dict, news_score: int = 0):
     fund = calc_fund_signal(r, news_score)
+    rating = calc_composite_rating(r, news_score)
+    main_score = display_smart_score(r)
     return (
         f"{idx}. {r['ticker']} {r['name']}\n"
-        f"   主力分數：{r.get('smart_score', 0)}/10｜左倍量：{r.get('left_vol_ratio', r.get('vol_ratio', 0)):.2f}倍\n"
+        f"   主力分數：{main_score}/10｜左倍量：{r.get('left_vol_ratio', r.get('vol_ratio', 0)):.2f}倍\n"
         f"   {r.get('kd_text', 'KD→')} {r.get('rsi_text', 'RSI→')}｜漲跌：{r['today_pct']:.2f}%｜RSI：{r['rsi']:.0f}\n"
-        f"   資金：{fund['label']}｜資金強度：{fund.get('strength', '觀察')}（{fund['score']:.1f}/10）\n"
+        f"   資金：{fund['label']}｜強度：{fund.get('strength', '觀察')}（{fund['score']:.1f}/10）\n"
+        f"   綜合評級：{rating['label']}｜{rating['advice']}\n"
         f"   資金依據：{fund['note']}｜風險：{r.get('risk_label', r.get('risk', '中'))}\n"
         f"   訊號：{r['signal']}｜建議：{r.get('entry_suggestion', '觀察')}"
     )
@@ -772,7 +822,7 @@ def make_pick_reply(command_name: str, group_name: str):
     rows, scan_count = scan_group(group_name)
     if not rows:
         return (
-            f"【AI選股 V4.5.4 SmartMoney Pro FundStrength Final】\n"
+            f"【AI選股 V4.5.5 SmartMoney Pro Final】\n"
             f"指令：{command_name}｜族群：{group_name}\n"
             f"掃描檔數：{scan_count} 檔\n"
             f"資料時間：{now_text()}\n\n"
@@ -794,7 +844,7 @@ def make_pick_reply(command_name: str, group_name: str):
         main_force,
         key=lambda x: (
             calc_fund_signal(x, news_score).get("score", 0),
-            x.get("smart_score", 0) + news_score,
+            display_smart_score(x) + news_score,
             x.get("left_volume", False),
             x.get("kd_up", False),
             x.get("rsi_up", False),
@@ -812,7 +862,7 @@ def make_pick_reply(command_name: str, group_name: str):
             and r.get("vol_ratio", 0) >= 1.0
             and r.get("risk") != "高"
         ]
-        fallback = sorted(fallback, key=lambda x: (x.get("smart_score", 0), x.get("score", 0), x.get("vol_ratio", 0)), reverse=True)
+        fallback = sorted(fallback, key=lambda x: (display_smart_score(x), x.get("score", 0), x.get("vol_ratio", 0)), reverse=True)
         seen = {r["raw_ticker"] for r in main_force}
         for r in fallback:
             if r["raw_ticker"] not in seen:
@@ -828,7 +878,7 @@ def make_pick_reply(command_name: str, group_name: str):
         and r.get("not_overheat")
         and (r.get("kd_up") or r.get("rsi_up"))
     ]
-    swing = sorted(swing, key=lambda x: (calc_fund_signal(x, news_score).get("score", 0), x.get("kd_up", False), x.get("rsi_up", False), x.get("smart_score", 0), x.get("score", 0)), reverse=True)[:5]
+    swing = sorted(swing, key=lambda x: (calc_fund_signal(x, news_score).get("score", 0), x.get("kd_up", False), x.get("rsi_up", False), display_smart_score(x), x.get("score", 0)), reverse=True)[:5]
 
     hot = [r for r in rows if r.get("today_pct", 0) > 0 or r.get("vol_ratio", 0) >= 1.2]
     hot = sorted(hot, key=lambda x: (x.get("today_pct", 0), x.get("vol_ratio", 0), calc_fund_signal(x, news_score).get("score", 0), x.get("smart_score", 0)), reverse=True)[:5]
@@ -838,12 +888,16 @@ def make_pick_reply(command_name: str, group_name: str):
     strong_count = sum(1 for r in rows if r["today_pct"] > 0 and r["vol_ratio"] >= 1.2)
 
     lines = []
-    lines.append("【AI選股 V4.5.4 SmartMoney Pro FundStrength Final】")
+    lines.append("【AI選股 V4.5.5 SmartMoney Pro Final】")
     lines.append(f"指令：{command_name}｜族群：{group_name}")
     lines.append(f"掃描檔數：{scan_count} 檔｜成功分析：{len(rows)} 檔")
     lines.append(f"資料時間：{now_text()}")
     lines.append(f"今日族群概況：上漲 {up_count}/{len(rows)} 檔｜平均漲跌 {avg_pct:.2f}%｜量能轉強 {strong_count} 檔")
     lines.append(f"族群資金：{group_fund['label']}｜平均資金強度 {group_fund['avg_score']:.1f}/10｜流入 {group_fund['strong']}｜轉弱 {group_fund['weak']}")
+    # 族群綜合評級：用平均資金與新聞方向快速提示是否優先觀察。
+    group_total = group_fund['avg_score'] + (0.8 if news_score > 0 else (-0.8 if news_score < 0 else 0))
+    group_rating = "🟢A級" if group_total >= 6.0 else ("🟡B級" if group_total >= 4.0 else "🔴C級")
+    lines.append(f"綜合評級：{group_rating}")
     lines.append(f"新聞燈號：{news_signal.get('summary', '🟡新聞觀察')}")
     if news_signal.get("titles"):
         for title in news_signal.get("titles", [])[:2]:
@@ -940,7 +994,7 @@ def make_heat_reply():
 
     summaries = sorted(summaries, key=lambda x: x.get("heat_score", -999), reverse=True)
     lines = []
-    lines.append("【AI選股 V4.5.4 SmartMoney Pro FundStrength Final】")
+    lines.append("【AI選股 V4.5.5 SmartMoney Pro Final】")
     lines.append("指令：族群熱度｜族群：全部主題")
     lines.append(f"資料時間：{now_text()}")
     lines.append("\n🔥 族群熱度排行")
@@ -979,7 +1033,7 @@ def help_text():
         "股票分析：\n"
         "股票代碼 買入價\n"
         "例：2330 800\n\n"
-        "V4.5.4：選股結果新增資金強度，股票分析新增資金流向燈號。"
+        "V4.5.5：資金強度分級優化，新增綜合評級 A/B/C。"
     )
 
 def handle_message(text: str):
@@ -1141,6 +1195,8 @@ def make_price_reply(code: str, buy_price: float):
         f"【資金流向】\n"
         f"{calc_fund_signal(row, 0)['label']}｜資金強度：{calc_fund_signal(row, 0).get('strength', '觀察')}（{calc_fund_signal(row, 0)['score']:.1f}/10）\n"
         f"判斷：{calc_fund_signal(row, 0)['note']}\n\n"
+        f"【綜合評級】\n"
+        f"{calc_composite_rating(row, 0)['label']}｜{calc_composite_rating(row, 0)['advice']}\n\n"
         f"提醒：以上為技術分析輔助，不代表保證獲利。"
     )
 
