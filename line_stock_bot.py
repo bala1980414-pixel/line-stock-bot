@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-LINE 股票機器人 V4.5.3 Lite FundFlow SmartMoney Final 正式版
+LINE 股票機器人 V4.5.4 SmartMoney Pro FundStrength Final 正式版
 用途：部署在 Render，LINE 輸入 0~10 指令回傳族群熱度與選股結果。
 
 Render Start Command：gunicorn line_stock_bot:app
@@ -207,7 +207,7 @@ def reply_text(reply_token: str, text: str):
 
 @app.route("/", methods=["GET"])
 def home():
-    return "LINE 股票機器人 V4.5.3 Lite FundFlow SmartMoney Final is running."
+    return "LINE 股票機器人 V4.5.4 SmartMoney Pro FundStrength Final is running."
 
 
 @app.route("/callback", methods=["POST"])
@@ -607,7 +607,7 @@ def make_news_signal(group_name: str):
 
 
 def calc_fund_signal(row: dict, news_score: int = 0):
-    """V4.5.3 Lite 資金流：不接外部法人資料，改用量價、Smart Score、KD/RSI、風險與新聞綜合推估。
+    """V4.5.4 資金強度：不接外部法人資料，改用量價、Smart Score、KD/RSI、風險與新聞綜合推估。
 
     回傳：label / score / note
     score 以 0~10 表示，滿分不常出現，方便實戰區分強弱。
@@ -705,8 +705,19 @@ def calc_fund_signal(row: dict, news_score: int = 0):
     else:
         label = "🟡資金觀察"
 
+    if score >= 8.5:
+        strength = "極強"
+    elif score >= 6.5:
+        strength = "偏強"
+    elif score >= 4.0:
+        strength = "中性偏強"
+    elif score >= 2.0:
+        strength = "觀察偏弱"
+    else:
+        strength = "轉弱"
+
     note = "、".join(reasons[:3]) if reasons else "等待量價確認"
-    return {"label": label, "score": score, "note": note}
+    return {"label": label, "score": score, "strength": strength, "note": note}
 
 
 def calc_fund_light(row: dict, news_score: int = 0):
@@ -751,7 +762,7 @@ def fmt_stock_line(idx: int, r: dict, news_score: int = 0):
         f"{idx}. {r['ticker']} {r['name']}\n"
         f"   主力分數：{r.get('smart_score', 0)}/10｜左倍量：{r.get('left_vol_ratio', r.get('vol_ratio', 0)):.2f}倍\n"
         f"   {r.get('kd_text', 'KD→')} {r.get('rsi_text', 'RSI→')}｜漲跌：{r['today_pct']:.2f}%｜RSI：{r['rsi']:.0f}\n"
-        f"   資金：{fund['label']}｜資金分數：{fund['score']:.1f}/10\n"
+        f"   資金：{fund['label']}｜資金強度：{fund.get('strength', '觀察')}（{fund['score']:.1f}/10）\n"
         f"   資金依據：{fund['note']}｜風險：{r.get('risk_label', r.get('risk', '中'))}\n"
         f"   訊號：{r['signal']}｜建議：{r.get('entry_suggestion', '觀察')}"
     )
@@ -761,7 +772,7 @@ def make_pick_reply(command_name: str, group_name: str):
     rows, scan_count = scan_group(group_name)
     if not rows:
         return (
-            f"【AI選股 V4.5.3 Lite FundFlow SmartMoney Final】\n"
+            f"【AI選股 V4.5.4 SmartMoney Pro FundStrength Final】\n"
             f"指令：{command_name}｜族群：{group_name}\n"
             f"掃描檔數：{scan_count} 檔\n"
             f"資料時間：{now_text()}\n\n"
@@ -827,12 +838,12 @@ def make_pick_reply(command_name: str, group_name: str):
     strong_count = sum(1 for r in rows if r["today_pct"] > 0 and r["vol_ratio"] >= 1.2)
 
     lines = []
-    lines.append("【AI選股 V4.5.3 Lite FundFlow SmartMoney Final】")
+    lines.append("【AI選股 V4.5.4 SmartMoney Pro FundStrength Final】")
     lines.append(f"指令：{command_name}｜族群：{group_name}")
     lines.append(f"掃描檔數：{scan_count} 檔｜成功分析：{len(rows)} 檔")
     lines.append(f"資料時間：{now_text()}")
     lines.append(f"今日族群概況：上漲 {up_count}/{len(rows)} 檔｜平均漲跌 {avg_pct:.2f}%｜量能轉強 {strong_count} 檔")
-    lines.append(f"族群資金：{group_fund['label']}｜平均資金 {group_fund['avg_score']:.1f}/10｜流入 {group_fund['strong']}｜轉弱 {group_fund['weak']}")
+    lines.append(f"族群資金：{group_fund['label']}｜平均資金強度 {group_fund['avg_score']:.1f}/10｜流入 {group_fund['strong']}｜轉弱 {group_fund['weak']}")
     lines.append(f"新聞燈號：{news_signal.get('summary', '🟡新聞觀察')}")
     if news_signal.get("titles"):
         for title in news_signal.get("titles", [])[:2]:
@@ -929,7 +940,7 @@ def make_heat_reply():
 
     summaries = sorted(summaries, key=lambda x: x.get("heat_score", -999), reverse=True)
     lines = []
-    lines.append("【AI選股 V4.5.3 Lite FundFlow SmartMoney Final】")
+    lines.append("【AI選股 V4.5.4 SmartMoney Pro FundStrength Final】")
     lines.append("指令：族群熱度｜族群：全部主題")
     lines.append(f"資料時間：{now_text()}")
     lines.append("\n🔥 族群熱度排行")
@@ -945,7 +956,7 @@ def make_heat_reply():
                 f"   上漲 {s['up']}/{s['ok']}｜平均 {s['avg']:.2f}%｜量能轉強 {s['strong']}｜左倍量 {s.get('left', 0)}"
             )
             lines.append(
-                f"   {s.get('fund_label', '🟡族群資金觀察')}｜平均資金 {s.get('avg_fund', 0):.1f}/10"
+                f"   {s.get('fund_label', '🟡族群資金觀察')}｜平均資金強度 {s.get('avg_fund', 0):.1f}/10"
             )
     lines.append("\n說明：括號內數字為 LINE 指令代碼；熱度已納入量價、左倍量、Smart Money 與資金強度。")
     return "\n".join(lines)
@@ -968,7 +979,7 @@ def help_text():
         "股票分析：\n"
         "股票代碼 買入價\n"
         "例：2330 800\n\n"
-        "V4.5.3 Lite：選股結果新增資金強度分數、族群資金燈號與新聞燈號。"
+        "V4.5.4：選股結果新增資金強度，股票分析新增資金流向燈號。"
     )
 
 def handle_message(text: str):
@@ -1127,6 +1138,9 @@ def make_price_reply(code: str, buy_price: float):
         f"MA5 {ma5:.2f} / MA10 {ma10:.2f} / MA20 {ma20:.2f}\n\n"
         f"【量能狀態】\n"
         f"量比：約 {row['vol_ratio']:.2f}\n\n"
+        f"【資金流向】\n"
+        f"{calc_fund_signal(row, 0)['label']}｜資金強度：{calc_fund_signal(row, 0).get('strength', '觀察')}（{calc_fund_signal(row, 0)['score']:.1f}/10）\n"
+        f"判斷：{calc_fund_signal(row, 0)['note']}\n\n"
         f"提醒：以上為技術分析輔助，不代表保證獲利。"
     )
 
