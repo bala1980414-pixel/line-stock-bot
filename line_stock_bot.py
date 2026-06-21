@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-LINE 股票機器人 V4.5.1 SmartMoney Final 正式版
+LINE 股票機器人 V4.5.2 NewsFlow SmartMoney Final 正式版
 用途：部署在 Render，LINE 輸入 0~10 指令回傳族群熱度與選股結果。
 
 Render Start Command：gunicorn line_stock_bot:app
@@ -27,6 +27,8 @@ import hashlib
 import traceback
 import contextlib
 import io
+import urllib.parse
+import xml.etree.ElementTree as ET
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -154,6 +156,31 @@ _STOCK_NAME_CACHE = {}
 _ANALYSIS_CACHE = {}
 _CACHE_TTL_SECONDS = 300
 
+_NEWS_CACHE = {}
+_NEWS_CACHE_TTL_SECONDS = 900
+
+GROUP_NEWS_KEYWORDS = {
+    "全部": "台股 電子 重電 AI 伺服器 資金",
+    "PCB": "台股 PCB ABF 載板 銅箔基板",
+    "ABF": "台股 ABF 載板 IC載板",
+    "ASIC": "台股 ASIC AI 晶片 IC設計",
+    "記憶體": "台股 記憶體 DRAM NAND 南亞科 華邦電",
+    "低軌衛星": "台股 低軌衛星 通訊 衛星",
+    "CoPoS": "台股 CoWoS CoPoS 先進封裝 AI",
+    "Intel": "Intel 台股 供應鏈 半導體",
+    "化學": "台股 化學 材料 特化 半導體材料",
+    "矽晶圓": "台股 矽晶圓 半導體 中美晶 環球晶",
+}
+
+NEWS_BAD_WORDS = [
+    "利空", "下修", "砍單", "衰退", "禁令", "制裁", "關稅", "調查", "虧損", "跌停",
+    "重挫", "暴跌", "賣壓", "法說保守", "庫存", "需求疲弱", "降評", "減碼", "延後",
+]
+NEWS_GOOD_WORDS = [
+    "利多", "漲價", "訂單", "擴產", "成長", "上修", "旺季", "AI", "伺服器", "需求強",
+    "轉強", "買超", "受惠", "突破", "新高", "合作", "接單",
+]
+
 # ============================================================
 # LINE 基礎功能
 # ============================================================
@@ -180,7 +207,7 @@ def reply_text(reply_token: str, text: str):
 
 @app.route("/", methods=["GET"])
 def home():
-    return "LINE 股票機器人 V4.5.1 SmartMoney Final is running."
+    return "LINE 股票機器人 V4.5.2 NewsFlow SmartMoney Final is running."
 
 
 @app.route("/callback", methods=["POST"])
@@ -490,6 +517,7 @@ def analyze_one(ticker: str, name: str):
         "not_overheat": not_overheat,
         "signal": signal_text,
         "entry_suggestion": entry_suggestion,
+        "fund_light": "🟡資金觀察",
     }
     _ANALYSIS_CACHE[cache_key] = {"ts": now_ts, "row": dict(row)}
     return row
@@ -510,6 +538,104 @@ def scan_group(group_name: str, max_items=None):
         time.sleep(0.08)
     return rows, len(items)
 
+
+def fetch_google_news_titles(query: str, max_items: int = 5):
+    """輕量新聞檢查：使用 Google News RSS，不增加新套件；失敗時自動降級，不影響 LINE 回傳。"""
+    cache_key = query
+    now_ts = time.time()
+    cached = _NEWS_CACHE.get(cache_key)
+    if cached and now_ts - cached.get("ts", 0) < _NEWS_CACHE_TTL_SECONDS:
+        return list(cached.get("titles", []))
+
+    titles = []
+    try:
+        q = urllib.parse.quote(query)
+        url = f"https://news.google.com/rss/search?q={q}&hl=zh-TW&gl=TW&ceid=TW:zh-Hant"
+        resp = requests.get(url, timeout=4, headers={"User-Agent": "Mozilla/5.0"})
+        if resp.status_code == 200 and resp.text:
+            root = ET.fromstring(resp.content)
+            for item in root.findall(".//item")[:max_items]:
+                title_el = item.find("title")
+                if title_el is not None and title_el.text:
+                    title = title_el.text.strip()
+                    # Google RSS title 常帶來源，用空白即可保留辨識，不做過度清洗。
+                    titles.append(title[:80])
+    except Exception:
+        titles = []
+
+    _NEWS_CACHE[cache_key] = {"ts": now_ts, "titles": list(titles)}
+    return titles
+
+
+def make_news_signal(group_name: str):
+    query = GROUP_NEWS_KEYWORDS.get(group_name, f"台股 {group_name}")
+    titles = fetch_google_news_titles(query, max_items=5)
+    if not titles:
+        return {
+            "label": "🟡新聞觀察",
+            "score": 0,
+            "summary": "暫時抓不到即時新聞，先以技術面與資金燈號判斷。",
+            "titles": [],
+        }
+
+    bad_hits = []
+    good_hits = []
+    joined_titles = " ".join(titles)
+    for w in NEWS_BAD_WORDS:
+        if w in joined_titles:
+            bad_hits.append(w)
+    for w in NEWS_GOOD_WORDS:
+        if w in joined_titles:
+            good_hits.append(w)
+
+    if len(bad_hits) >= 2 and len(bad_hits) > len(good_hits):
+        label = "🔴新聞利空"
+        score = -2
+    elif len(bad_hits) >= 1 and len(bad_hits) >= len(good_hits):
+        label = "🟡新聞警戒"
+        score = -1
+    elif len(good_hits) >= 2 and len(good_hits) > len(bad_hits):
+        label = "🟢新聞偏多"
+        score = 1
+    else:
+        label = "🟡新聞觀察"
+        score = 0
+
+    key_text = "、".join((bad_hits[:3] if bad_hits else good_hits[:3])) or "無明顯關鍵字"
+    summary = f"{label}｜關鍵字：{key_text}"
+    return {"label": label, "score": score, "summary": summary, "titles": titles[:2]}
+
+
+def calc_fund_light(row: dict, news_score: int = 0):
+    """V4.5.2 資金燈號：以量價、Smart Score、KD/RSI 與新聞分數綜合判斷。"""
+    smart = row.get("smart_score", 0)
+    risk = row.get("risk", "中")
+    vol_ratio = row.get("vol_ratio", 0)
+    today_pct = row.get("today_pct", 0)
+    kd_up = row.get("kd_up", False)
+    rsi_up = row.get("rsi_up", False)
+    left_volume = row.get("left_volume", False)
+    price_volume_good = row.get("price_volume_good", False)
+
+    score = 0
+    score += 2 if left_volume else 0
+    score += 2 if price_volume_good else 0
+    score += 1 if smart >= 7 else (0.5 if smart >= 5 else 0)
+    score += 1 if kd_up else 0
+    score += 1 if rsi_up else 0
+    score += 1 if vol_ratio >= 1.3 and today_pct > 0 else 0
+    score += news_score
+    score -= 2 if risk == "高" else (0.5 if risk == "中" else 0)
+    score -= 1 if today_pct < 0 and vol_ratio >= 1.2 else 0
+
+    if score >= 5:
+        return "🟢資金流入"
+    if score >= 2.5:
+        return "🟡資金觀察"
+    if score <= 0:
+        return "🔴資金轉弱"
+    return "🟡資金觀察"
+
 # ============================================================
 # 回傳格式
 # ============================================================
@@ -519,12 +645,14 @@ def risk_rank_value(r: dict):
     return {"低": 0, "中": 1, "高": 2}.get(risk, 1)
 
 
-def fmt_stock_line(idx: int, r: dict):
+def fmt_stock_line(idx: int, r: dict, news_score: int = 0):
+    fund_light = calc_fund_light(r, news_score)
     return (
         f"{idx}. {r['ticker']} {r['name']}\n"
         f"   主力分數：{r.get('smart_score', 0)}/10｜左倍量：{r.get('left_vol_ratio', r.get('vol_ratio', 0)):.2f}倍\n"
         f"   {r.get('kd_text', 'KD→')} {r.get('rsi_text', 'RSI→')}｜漲跌：{r['today_pct']:.2f}%｜RSI：{r['rsi']:.0f}\n"
-        f"   訊號：{r['signal']}｜風險：{r.get('risk_label', r.get('risk', '中'))}｜建議：{r.get('entry_suggestion', '觀察')}"
+        f"   資金：{fund_light}｜風險：{r.get('risk_label', r.get('risk', '中'))}\n"
+        f"   訊號：{r['signal']}｜建議：{r.get('entry_suggestion', '觀察')}"
     )
 
 
@@ -532,12 +660,15 @@ def make_pick_reply(command_name: str, group_name: str):
     rows, scan_count = scan_group(group_name)
     if not rows:
         return (
-            f"【AI選股 V4.5.1 SmartMoney Final】\n"
+            f"【AI選股 V4.5.2 NewsFlow SmartMoney Final】\n"
             f"指令：{command_name}｜族群：{group_name}\n"
             f"掃描檔數：{scan_count} 檔\n"
             f"資料時間：{now_text()}\n\n"
             f"目前抓不到足夠資料，可能是 Yahoo Finance 暫時無回應或資料尚未更新。"
         )
+
+    news_signal = make_news_signal(group_name)
+    news_score = int(news_signal.get("score", 0))
 
     # 主力進貨：Smart Money Score 優先，仍保留左倍量與低追高精神。
     main_force = [
@@ -548,7 +679,13 @@ def make_pick_reply(command_name: str, group_name: str):
     ]
     main_force = sorted(
         main_force,
-        key=lambda x: (x.get("smart_score", 0), x.get("left_volume", False), x.get("kd_up", False), x.get("rsi_up", False), -x.get("bias5", 99)),
+        key=lambda x: (
+            x.get("smart_score", 0) + news_score,
+            x.get("left_volume", False),
+            x.get("kd_up", False),
+            x.get("rsi_up", False),
+            -x.get("bias5", 99),
+        ),
         reverse=True,
     )[:5]
 
@@ -587,11 +724,15 @@ def make_pick_reply(command_name: str, group_name: str):
     strong_count = sum(1 for r in rows if r["today_pct"] > 0 and r["vol_ratio"] >= 1.2)
 
     lines = []
-    lines.append("【AI選股 V4.5.1 SmartMoney Final】")
+    lines.append("【AI選股 V4.5.2 NewsFlow SmartMoney Final】")
     lines.append(f"指令：{command_name}｜族群：{group_name}")
     lines.append(f"掃描檔數：{scan_count} 檔｜成功分析：{len(rows)} 檔")
     lines.append(f"資料時間：{now_text()}")
     lines.append(f"今日族群概況：上漲 {up_count}/{len(rows)} 檔｜平均漲跌 {avg_pct:.2f}%｜量能轉強 {strong_count} 檔")
+    lines.append(f"新聞燈號：{news_signal.get('summary', '🟡新聞觀察')}")
+    if news_signal.get("titles"):
+        for title in news_signal.get("titles", [])[:2]:
+            lines.append(f"新聞：{title}")
 
     lines.append("\n━━━━━━━━━━━━━━")
     lines.append("🔥 主力進貨 TOP5")
@@ -599,7 +740,7 @@ def make_pick_reply(command_name: str, group_name: str):
     lines.append("━━━━━━━━━━━━━━")
     if main_force:
         for i, r in enumerate(main_force, 1):
-            lines.append(fmt_stock_line(i, r))
+            lines.append(fmt_stock_line(i, r, news_score))
     else:
         lines.append("目前沒有明顯 Smart Money 進貨股，建議先觀察，不硬追。")
 
@@ -609,7 +750,7 @@ def make_pick_reply(command_name: str, group_name: str):
     lines.append("━━━━━━━━━━━━━━")
     if swing:
         for i, r in enumerate(swing, 1):
-            lines.append(fmt_stock_line(i, r))
+            lines.append(fmt_stock_line(i, r, news_score))
     else:
         lines.append("目前沒有明顯健康續強股。")
 
@@ -619,7 +760,7 @@ def make_pick_reply(command_name: str, group_name: str):
     lines.append("━━━━━━━━━━━━━━")
     if hot:
         for i, r in enumerate(hot, 1):
-            lines.append(fmt_stock_line(i, r))
+            lines.append(fmt_stock_line(i, r, news_score))
     else:
         lines.append("目前族群熱度不足。")
 
@@ -680,7 +821,7 @@ def make_heat_reply():
 
     summaries = sorted(summaries, key=lambda x: x.get("heat_score", -999), reverse=True)
     lines = []
-    lines.append("【AI選股 V4.5.1 SmartMoney Final】")
+    lines.append("【AI選股 V4.5.2 NewsFlow SmartMoney Final】")
     lines.append("指令：族群熱度｜族群：全部主題")
     lines.append(f"資料時間：{now_text()}")
     lines.append("\n🔥 族群熱度排行")
@@ -715,7 +856,8 @@ def help_text():
         "10 = 選股矽晶圓\n\n"
         "股票分析：\n"
         "股票代碼 買入價\n"
-        "例：2330 800"
+        "例：2330 800\n\n"
+        "V4.5.2：選股結果新增新聞燈號與資金燈號。"
     )
 
 def handle_message(text: str):
