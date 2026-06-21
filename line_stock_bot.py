@@ -25,6 +25,8 @@ import hmac
 import base64
 import hashlib
 import traceback
+import contextlib
+import io
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -53,26 +55,26 @@ STOCK_GROUPS = {
         "2376.TW": "技嘉", "2357.TW": "華碩", "2383.TW": "台光電", "2368.TW": "金像電",
         "3037.TW": "欣興", "8046.TW": "南電", "3189.TW": "景碩", "2408.TW": "南亞科",
         "2344.TW": "華邦電", "3006.TW": "晶豪科", "3443.TW": "創意", "3661.TW": "世芯-KY",
-        "3034.TW": "聯詠", "5269.TW": "祥碩", "3529.TW": "力旺", "6531.TW": "愛普*",
+        "3034.TW": "聯詠", "5269.TW": "祥碩", "3529.TWO": "力旺", "6531.TW": "愛普*",
         "4966.TW": "譜瑞-KY", "3665.TW": "貿聯-KY", "3105.TWO": "穩懋", "8086.TWO": "宏捷科",
         "5483.TWO": "中美晶", "6488.TWO": "環球晶", "3532.TW": "台勝科", "6182.TW": "合晶",
         "3708.TW": "上緯投控", "4739.TW": "康普", "4763.TW": "材料-KY", "4755.TW": "三福化",
         "4721.TW": "美琪瑪", "1513.TW": "中興電", "1609.TW": "大亞", "1504.TW": "東元",
         "1519.TW": "華城", "1605.TW": "華新", "1618.TW": "合機", "6285.TW": "啟碁",
         "2412.TW": "中華電", "4906.TW": "正文", "3596.TW": "智易", "2313.TW": "華通",
-        "4958.TW": "臻鼎-KY", "6274.TW": "台燿", "6213.TW": "聯茂", "3035.TW": "智原",
+        "4958.TW": "臻鼎-KY", "6274.TWO": "台燿", "6213.TW": "聯茂", "3035.TW": "智原",
     },
     "PCB": {
         "2383.TW": "台光電", "2368.TW": "金像電", "3037.TW": "欣興", "8046.TW": "南電",
-        "3189.TW": "景碩", "2313.TW": "華通", "4958.TW": "臻鼎-KY", "6274.TW": "台燿",
+        "3189.TW": "景碩", "2313.TW": "華通", "4958.TW": "臻鼎-KY", "6274.TWO": "台燿",
         "6213.TW": "聯茂", "5469.TWO": "瀚宇博", "6191.TW": "精成科", "6269.TW": "台郡",
     },
     "ABF": {
         "3037.TW": "欣興", "8046.TW": "南電", "3189.TW": "景碩", "2383.TW": "台光電",
-        "2368.TW": "金像電", "6274.TW": "台燿",
+        "2368.TW": "金像電", "6274.TWO": "台燿",
     },
     "ASIC": {
-        "3443.TW": "創意", "3661.TW": "世芯-KY", "3035.TW": "智原", "3529.TW": "力旺",
+        "3443.TW": "創意", "3661.TW": "世芯-KY", "3035.TW": "智原", "3529.TWO": "力旺",
         "6531.TW": "愛普*", "5269.TW": "祥碩", "3034.TW": "聯詠", "2454.TW": "聯發科",
     },
     "記憶體": {
@@ -149,6 +151,8 @@ COMMON_STOCK_NAMES = {
 }
 
 _STOCK_NAME_CACHE = {}
+_ANALYSIS_CACHE = {}
+_CACHE_TTL_SECONDS = 300
 
 # ============================================================
 # LINE 基礎功能
@@ -245,10 +249,23 @@ def safe_float(x, default=0.0):
         return default
 
 
-def fetch_stock_df(ticker: str, retries: int = 2):
+def fetch_stock_df(ticker: str, retries: int = 1):
+    """抓 Yahoo Finance 日線資料。
+    V4.5.1 修正：Render Logs 不再大量印出 Yahoo delisted 紅字，並縮短 0 族群熱度等待時間。
+    """
     for i in range(retries):
         try:
-            df = yf.download(ticker, period="4mo", interval="1d", auto_adjust=False, progress=False, threads=False)
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                df = yf.download(
+                    ticker,
+                    period="4mo",
+                    interval="1d",
+                    auto_adjust=False,
+                    progress=False,
+                    threads=False,
+                    timeout=8,
+                )
             if df is not None and len(df) >= 35:
                 if isinstance(df.columns, pd.MultiIndex):
                     df.columns = [c[0] for c in df.columns]
@@ -256,9 +273,8 @@ def fetch_stock_df(ticker: str, retries: int = 2):
                 if len(df) >= 35:
                     return df
         except Exception:
-            time.sleep(0.3 + i * 0.3)
+            time.sleep(0.15 + i * 0.15)
     return None
-
 
 def calc_rsi(close: pd.Series, period: int = 14):
     delta = close.diff()
@@ -270,6 +286,14 @@ def calc_rsi(close: pd.Series, period: int = 14):
 
 
 def analyze_one(ticker: str, name: str):
+    cache_key = ticker
+    now_ts = time.time()
+    cached = _ANALYSIS_CACHE.get(cache_key)
+    if cached and now_ts - cached.get('ts', 0) < _CACHE_TTL_SECONDS:
+        row = dict(cached['row'])
+        row['name'] = name
+        return row
+
     df = fetch_stock_df(ticker)
     if df is None or len(df) < 35:
         return None
@@ -434,7 +458,7 @@ def analyze_one(ticker: str, name: str):
     rsi_text = "RSI↑" if rsi_up else "RSI→"
     entry_suggestion = "可進場觀察" if (smart_score >= 7 and risk == "低") else ("等拉回確認" if risk != "高" and smart_score >= 5 else "暫不追價")
 
-    return {
+    row = {
         "ticker": ticker.replace(".TW", "").replace(".TWO", ""),
         "raw_ticker": ticker,
         "name": name,
@@ -467,11 +491,16 @@ def analyze_one(ticker: str, name: str):
         "signal": signal_text,
         "entry_suggestion": entry_suggestion,
     }
+    _ANALYSIS_CACHE[cache_key] = {"ts": now_ts, "row": dict(row)}
+    return row
 
-def scan_group(group_name: str):
+def scan_group(group_name: str, max_items=None):
     pool = STOCK_GROUPS.get(group_name, STOCK_GROUPS["全部"])
+    items = list(pool.items())
+    if max_items is not None:
+        items = items[:max_items]
     rows = []
-    for ticker, name in pool.items():
+    for ticker, name in items:
         try:
             row = analyze_one(ticker, name)
             if row:
@@ -479,7 +508,7 @@ def scan_group(group_name: str):
         except Exception:
             traceback.print_exc()
         time.sleep(0.08)
-    return rows, len(pool)
+    return rows, len(items)
 
 # ============================================================
 # 回傳格式
@@ -620,7 +649,7 @@ def make_heat_reply():
     ]
     summaries = []
     for group_name, display_name, cmd_code in group_items:
-        rows, scan_count = scan_group(group_name)
+        rows, scan_count = scan_group(group_name, max_items=8)
         if not rows:
             summaries.append({
                 "group": group_name, "display": display_name, "cmd": cmd_code,
